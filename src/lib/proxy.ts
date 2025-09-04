@@ -2,10 +2,10 @@
   process.env.RPA_BASE_URL?.replace(/\/+$/,"") || "";
 
 export function assertRpaBaseUrl() {
-  if (!RPA_BASE_URL) {
-    throw new Error("RPA_BASE_URL is not set. Put it in .env.local (e.g. http://localhost:8888)");
-  }
+  // 新逻辑：不再要求 .env.local 设置 RPA_BASE_URL
+  return; // 什么也不做
 }
+
 
 export async function proxyJSON(path: string, init?: RequestInit): Promise<Response> {
   assertRpaBaseUrl();
