@@ -1,5 +1,7 @@
 import { NextRequest, NextResponse } from "next/server";
 import { adminDb } from "@/lib/firebaseAdmin";
+import axios from "axios";
+import url from "url";
 
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
@@ -156,14 +158,18 @@ export async function POST(req: NextRequest) {
       const body = new URLSearchParams();
       body.set("mobilenumber", mobile);
       body.set("smstext", (message || "").replace(/&/g, "＆")); // 与旧脚本一致
-
       if (useReport) {
         body.set("status", "1");
         body.set("smsid", genReqId());
       }
 
-      const resp = await fetch(apiUrl, {
-        method: "POST",
+      // Fixie 代理配置
+      const fixieUrl = process.env.FIXIE_URL
+        ? url.parse(process.env.FIXIE_URL)
+        : null;
+      const fixieAuth =
+        fixieUrl && fixieUrl.auth ? fixieUrl.auth.split(":") : [];
+      const axiosConfig = {
         headers: {
           Authorization:
             "Basic " + Buffer.from(`${apiId}:${apiPass}`).toString("base64"),
@@ -171,10 +177,39 @@ export async function POST(req: NextRequest) {
           "User-Agent": "nextjs-fetch/1.0",
           Connection: "close",
         },
-        body: body.toString(),
-      });
+        proxy: fixieUrl
+          ? {
+              protocol: fixieUrl.protocol.replace(":", ""),
+              host: fixieUrl.hostname,
+              port: Number(fixieUrl.port),
+              auth: {
+                username: fixieAuth[0],
+                password: fixieAuth[1],
+              },
+            }
+          : false,
+        timeout: 15000,
+      };
 
-      const text = await resp.text();
+      let resp, text;
+      try {
+        resp = await axios.post(apiUrl, body.toString(), axiosConfig);
+        text =
+          typeof resp.data === "string" ? resp.data : JSON.stringify(resp.data);
+        // axios 的 resp.status 是数字
+        resp = { ok: true, status: resp.status };
+      } catch (err: any) {
+        if (err.response) {
+          resp = { ok: false, status: err.response.status };
+          text =
+            typeof err.response.data === "string"
+              ? err.response.data
+              : JSON.stringify(err.response.data);
+        } else {
+          resp = { ok: false, status: 500 };
+          text = err.message || "Unknown error";
+        }
+      }
       return { resp, text };
     }
 
