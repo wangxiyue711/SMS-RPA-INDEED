@@ -169,6 +169,21 @@ export async function POST(req: NextRequest) {
         : null;
       const fixieAuth =
         fixieUrl && fixieUrl.auth ? fixieUrl.auth.split(":") : [];
+
+      const proxyConfig = fixieUrl
+        ? {
+            protocol: (fixieUrl.protocol || "http:").replace(":", "") as
+              | "http"
+              | "https",
+            host: fixieUrl.hostname || "",
+            port: Number(fixieUrl.port) || 80,
+            auth: {
+              username: fixieAuth[0] || "",
+              password: fixieAuth[1] || "",
+            },
+          }
+        : undefined;
+
       const axiosConfig = {
         headers: {
           Authorization:
@@ -177,17 +192,7 @@ export async function POST(req: NextRequest) {
           "User-Agent": "nextjs-fetch/1.0",
           Connection: "close",
         },
-        proxy: fixieUrl
-          ? {
-              protocol: fixieUrl.protocol.replace(":", ""),
-              host: fixieUrl.hostname,
-              port: Number(fixieUrl.port),
-              auth: {
-                username: fixieAuth[0],
-                password: fixieAuth[1],
-              },
-            }
-          : false,
+        proxy: proxyConfig,
         timeout: 15000,
       };
 
@@ -225,10 +230,11 @@ export async function POST(req: NextRequest) {
     }
 
     if (!resp.ok) {
+      const errorMessage = code_map[resp.status] || `HTTP ${resp.status}`;
       return NextResponse.json(
         {
           success: false,
-          error: `Gateway HTTP ${resp.status}`,
+          error: `${errorMessage} (${resp.status})`,
           details: text.slice(0, 2000),
           debug: { apiUrl, triedLocal: local, usedReport: !!useReport },
         },
@@ -236,9 +242,12 @@ export async function POST(req: NextRequest) {
       );
     }
 
+    // 成功时也检查状态码，提供更详细的信息
+    const statusMessage = code_map[resp.status] || "OK";
     return NextResponse.json({
       success: true,
       status: resp.status,
+      statusMessage: statusMessage,
       output: text.slice(0, 4000),
     });
   } catch (e: any) {
