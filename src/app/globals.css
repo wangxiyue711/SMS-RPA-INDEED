@@ -1,8 +1,9 @@
 @import "tailwindcss";
 
 :root {
-  --background: #ffffff;
-  --foreground: #171717;
+  /* 把页面底色换成你的主题色 */
+  --background: #f8faef;        /* ← 原来是 #ffffff */
+  --foreground: #43503a;        /* 建议用你的文字色 */
 }
 
 @theme inline {
@@ -14,13 +15,18 @@
 
 @media (prefers-color-scheme: dark) {
   :root {
-    --background: #0a0a0a;
+    --background: #0a0a0a;      /* 深色模式按需设置 */
     --foreground: #ededed;
   }
 }
 
+/* 关键：铺满并去掉默认外边距 */
+html, body { height: 100%; }
 body {
+  margin: 0;                    /* 去掉浏览器默认 8px 外边距 */
   background: var(--background);
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
 }
+
+* { box-sizing: border-box; }
