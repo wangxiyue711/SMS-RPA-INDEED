@@ -23,19 +23,19 @@ export type SidebarProps = {
 
 /** 默认菜单（按你的新结构） */
 export const DEFAULT_ITEMS: SidebarItem[] = [
-  { key: "top", label: "TOP ⭕", href: "/main" },
+  { key: "top", label: "TOP", href: "/main" },
   {
     key: "rpa-group",
-    label: "RPA ⭕",
+    label: "RPA",
     children: [
-      { key: "account", label: "アカウント設定 ⭕ ", href: "/main/account" },
-      { key: "sms",     label: "SMS設定 ⭕",       href: "/main/sms" },
-      { key: "target",  label: "対象設定 ",      href: "/main/target" },
-      { key: "rpa",     label: "RPA実行 ",       href: "/main/rpa" },
+      { key: "account", label: "アカウント設定 ", href: "/main/account" },
+      { key: "sms",     label: "SMS設定 ",       href: "/main/sms" },
+      { key: "target",  label: "対象設定  ❌",      href: "/main/target" },
+      { key: "rpa",     label: "RPA実行 ❌",       href: "/main/rpa" },
     ],
   },
-  { key: "send",    label: "個別送信 ⭕",   href: "/main/send" },
-  { key: "history", label: "実行履歴 ⭕ ",   href: "/main/history" },
+  { key: "send",    label: "個別送信 ",   href: "/main/send" },
+  { key: "history", label: "実行履歴  ",   href: "/main/history" },
   // { key: "admin",   label: "Admin ",     href: "/main/admin" },
 ];
 
