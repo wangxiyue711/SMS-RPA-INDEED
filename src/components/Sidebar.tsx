@@ -35,7 +35,7 @@ export const DEFAULT_ITEMS: SidebarItem[] = [
     ],
   },
   { key: "send",    label: "個別送信 ⭕",   href: "/main/send" },
-  { key: "history", label: "実行履歴 ",   href: "/main/history" },
+  { key: "history", label: "実行履歴 ⭕ ",   href: "/main/history" },
   // { key: "admin",   label: "Admin ",     href: "/main/admin" },
 ];
 
