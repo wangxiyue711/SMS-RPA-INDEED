@@ -1,24 +1,35 @@
-import { NextRequest, NextResponse } from "next/server";
+// /src/app/api/rpa/personal-info/route.ts
+import { NextResponse } from "next/server";
 import { spawn } from "child_process";
 import path from "path";
 import fs from "fs";
 import os from "os";
 import { adminDb } from "../../../../lib/firebaseAdmin";
 
-export async function POST(req: NextRequest): Promise<NextResponse> {
-  const body = await req.json().catch(() => ({}));
+// 关键：声明 Node 运行时，避免 Edge 环境不允许 child_process/fs
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+export const maxDuration = 900; // 可选，长任务
+
+export async function POST(req: Request): Promise<Response> {
+  // 关键：使用 Web 标准 Request，而不是 NextRequest
+  let body: any = {};
+  try {
+    body = await req.json();
+  } catch (_) {
+    body = {};
+  }
+
   const userUid = body.userUid || body.config?.user_id;
+
   // 从 Firestore 读取用户配置（server-side），优先使用 userUid
   let cfg: any = body.config || {};
   if (userUid) {
     try {
-      const snap = await adminDb
-        .collection("user_configs")
-        .doc(String(userUid))
-        .get();
+      const snap = await adminDb.collection("user_configs").doc(String(userUid)).get();
       if (snap.exists) cfg = { ...(snap.data() || {}), ...(cfg || {}) };
-    } catch (e) {
-      // ignore and continue with provided cfg
+    } catch (_) {
+      // 忽略，继续使用传入 cfg
     }
   }
 
@@ -31,14 +42,12 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
     `rpa_cfg_${Date.now()}_${Math.floor(Math.random() * 10000)}.json`
   );
   try {
-    fs.writeFileSync(cfgFile, JSON.stringify({ config: cfg }), {
-      encoding: "utf8",
-    });
-  } catch (e) {
+    fs.writeFileSync(cfgFile, JSON.stringify({ config: cfg }), { encoding: "utf8" });
+  } catch (_) {
     // ignore
   }
 
-  // 如果 cfg 指定 monitor=true，则以 detached 后台进程启动并立即返回
+  // monitor 模式：后台 detached，立即返回 Response
   if (cfg && cfg.monitor) {
     try {
       const child = spawn(pythonCmd, [scriptPath, `--cfg-file=${cfgFile}`], {
@@ -48,17 +57,15 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       });
       child.unref();
       return NextResponse.json({ success: true, message: "monitor_started" });
-    } catch (e) {
-      return NextResponse.json(
-        { success: false, error: String(e) },
-        { status: 500 }
-      );
+    } catch (e: any) {
+      return NextResponse.json({ success: false, error: String(e) }, { status: 500 });
     }
   }
 
+  // 前台执行，收集输出
   const py = spawn(pythonCmd, [scriptPath, `--cfg-file=${cfgFile}`]);
 
-  const promise = new Promise<NextResponse>((resolve) => {
+  const promise: Promise<Response> = new Promise((resolve) => {
     let output = "";
     let error = "";
 
@@ -72,15 +79,15 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
 
     py.on("close", (code) => {
       try {
-        // foreground run 完成后尝试删除临时 cfg 文件
         if (fs.existsSync(cfgFile)) fs.unlinkSync(cfgFile);
-      } catch (e) {}
+      } catch (_) {}
+
       if (code === 0) {
-        // 尝试解析 python 输出为 JSON
+        // 尝试将 Python 标准输出解析为 JSON
         try {
           const parsed = JSON.parse(output);
           resolve(NextResponse.json({ success: true, data: parsed }));
-        } catch (e) {
+        } catch (_) {
           resolve(NextResponse.json({ success: true, data: output }));
         }
       } else {
@@ -93,25 +100,20 @@ export async function POST(req: NextRequest): Promise<NextResponse> {
       }
     });
 
-    // 延长超时以支持网页抓取（例如 selenium 可能需要更久）
-    const timeout = 300000; // 5 分钟
-    const t = setTimeout(() => {
+    // 超时保护（例如 selenium 场景）
+    const timeoutMs = 300000; // 5 分钟
+    const timer = setTimeout(() => {
       try {
         py.kill();
-      } catch (e) {}
+      } catch (_) {}
       try {
         if (fs.existsSync(cfgFile)) fs.unlinkSync(cfgFile);
-      } catch (e) {}
-      resolve(
-        NextResponse.json(
-          { success: false, error: "脚本执行超时" },
-          { status: 500 }
-        )
-      );
-    }, timeout);
+      } catch (_) {}
+      resolve(NextResponse.json({ success: false, error: "脚本执行超时" }, { status: 500 }));
+    }, timeoutMs);
 
-    py.on("exit", () => clearTimeout(t));
+    py.on("exit", () => clearTimeout(timer));
   });
 
-  return await promise;
+  return promise; // 明确返回 Promise<Response>
 }

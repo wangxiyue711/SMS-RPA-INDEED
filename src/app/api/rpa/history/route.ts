@@ -132,31 +132,14 @@ export async function POST(req: NextRequest) {
 
             const smsTextA = (smsConfig.sms_text_a || "").trim();
             const smsTextB = (smsConfig.sms_text_b || "").trim();
-            // 构造消息规则：
-            // - 仅当模板中显式包含占位符（如 {name}, {{name}}, $name, %NAME%）时把姓名替换进模板
-            // - 否则按模板原样拼接（避免无端插入姓名）
-            const namePart = payload.name ? String(payload.name).trim() : "";
-            function renderWithNameIfNeeded(tpl: string) {
-              if (!tpl) return "";
-              const placeholderRE =
-                /\{\{\s*name\s*\}\}|\{\s*name\s*\}|\$name|%NAME%/i;
-              if (placeholderRE.test(tpl)) {
-                return tpl.replace(
-                  /\{\{\s*name\s*\}\}|\{\s*name\s*\}|\$name|%NAME%/gi,
-                  namePart
-                );
-              }
-              return tpl;
-            }
-
-            const aRendered = renderWithNameIfNeeded(smsTextA);
-            const bRendered = renderWithNameIfNeeded(smsTextB);
-            let message = [aRendered, bRendered]
-              .filter(Boolean)
-              .join(" ")
-              .trim();
-            // 如果模板均为空但有姓名，则使用一个默认问候
-            if (!message && namePart) message = `こんにちは。${namePart}`;
+            // 发送规则改为：
+            // - 永远不把姓名插入到模板中
+            // - 只发送一个模板：优先使用 sms_text_a；若为空则使用 sms_text_b；两者都为空时使用通用默认短信（不含姓名）
+            let message =
+              smsTextA ||
+              smsTextB ||
+              "こんにちは。ご応募ありがとうございます。";
+            message = String(message).trim();
 
             // 发送函数（与 /api/sms/send 保持一致行为）
             async function postOnce(mobile: string) {
