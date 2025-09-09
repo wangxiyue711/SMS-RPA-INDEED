@@ -9,7 +9,7 @@ import { adminDb } from "../../../../lib/firebaseAdmin";
 // 关键：声明 Node 运行时，避免 Edge 环境不允许 child_process/fs
 export const runtime = "nodejs";
 export const dynamic = "force-dynamic";
-export const maxDuration = 900; // 可选，长任务
+// export const maxDuration = 900; // 可选，长任务
 
 export async function POST(req: Request): Promise<Response> {
   // 关键：使用 Web 标准 Request，而不是 NextRequest
