@@ -2,6 +2,7 @@
 "use client";
 
 import React, { useEffect, useMemo, useState, useCallback } from "react";
+import { resolveSmsResult } from "../../../lib/smsCodes";
 import { getApps, initializeApp } from "firebase/app";
 import { getAuth, onAuthStateChanged } from "firebase/auth";
 // firebase/firestore client imports removed: history page now uses server API (/api/rpa/history)
@@ -67,6 +68,7 @@ export default function UnifiedHistoryPage() {
     }
     return Date.now();
   }
+
   function fmtJa(ts: number) {
     return new Date(ts).toLocaleString("ja-JP");
   }
@@ -80,40 +82,14 @@ export default function UnifiedHistoryPage() {
       const unified: UnifiedItem[] = [];
 
       // 1) 個別送信（ローカル）
-      try {
-        const local = JSON.parse(localStorage.getItem("smsHistory") || "[]");
-        if (Array.isArray(local)) {
-          for (const it of local) {
-            const ts = toEpoch(it.timestamp ?? it.time ?? Date.now());
-            const title = `📱 ${it.phone || "-"} — ${String(
-              it.message || ""
-            ).trim()}`;
-            const level =
-              it.status === "success"
-                ? "success"
-                : it.status === "failed"
-                ? "failed"
-                : it.status === "error"
-                ? "error"
-                : "info";
-            unified.push({
-              id: `sms-local-${ts}-${it.phone || ""}-${Math.random()
-                .toString(36)
-                .slice(2, 7)}`,
-              timeEpoch: ts,
-              timeText: fmtJa(ts),
-              kind: "sms",
-              level,
-              title,
-              detail: it.statusInfo || undefined,
-            });
-          }
-        }
-      } catch {}
+      // NOTE: localStorage-based local SMS history has been deprecated for
+      // display. History now uses server-backed entries (/api/history/sms).
 
       // 2) 個別送信（サーバー・存在すれば）
       try {
-        const resp = await fetch(`/api/history/sms?limit=1000`);
+        const resp = await fetch(
+          `/api/history/sms?userUid=${encodeURIComponent(uid)}&limit=1000`
+        );
         if (resp.ok) {
           const data = await resp.json();
           const rows: ServerSms[] = Array.isArray(data?.items)
@@ -230,6 +206,33 @@ export default function UnifiedHistoryPage() {
   // uid/rpaLimit 变化重新拉
   useEffect(() => {
     refresh();
+  }, [refresh]);
+
+  // Auto-refresh when other tabs/pages send an SMS: listen via BroadcastChannel
+  useEffect(() => {
+    try {
+      const bc = new BroadcastChannel("sms-events");
+      const onMsg = (ev: any) => {
+        try {
+          if (ev?.data?.type === "sms:sent") refresh();
+        } catch {}
+      };
+      bc.addEventListener("message", onMsg);
+      // Also listen to storage events as a fallback
+      const onStorage = (e: StorageEvent) => {
+        if (e.key === "smsHistory") refresh();
+      };
+      window.addEventListener("storage", onStorage);
+      return () => {
+        try {
+          bc.removeEventListener("message", onMsg);
+          bc.close();
+        } catch {}
+        window.removeEventListener("storage", onStorage);
+      };
+    } catch {
+      // ignore if environment doesn't support BroadcastChannel
+    }
   }, [refresh]);
 
   // ---------- 过滤与搜索 ----------
@@ -357,6 +360,7 @@ export default function UnifiedHistoryPage() {
           >
             🔄 取得
           </button>
+          {/* ローカル同期ボタンは削除しました。履歴はサーバー側のデータを表示します。 */}
           <button
             onClick={exportCSV}
             style={{
@@ -430,6 +434,21 @@ export default function UnifiedHistoryPage() {
                 <tbody>
                   {rpaDocs.map((d) => {
                     const ts = toEpoch(d.createdAt ?? Date.now());
+                    // 尝试解析 provider/code 到可读信息
+                    const smsResponse = d.sms_response ?? null;
+                    const smsInfo = smsResponse
+                      ? resolveSmsResult(
+                          smsResponse.provider || "sms-console",
+                          smsResponse.output ?? smsResponse.body ?? smsResponse,
+                          typeof smsResponse.status === "number"
+                            ? smsResponse.status
+                            : smsResponse.status &&
+                              !Number.isNaN(Number(smsResponse.status))
+                            ? Number(smsResponse.status)
+                            : undefined
+                        )
+                      : null;
+
                     return (
                       <tr
                         key={d.id}
@@ -438,7 +457,23 @@ export default function UnifiedHistoryPage() {
                         <td style={{ padding: 10, whiteSpace: "nowrap" }}>
                           {fmtJa(ts)}
                         </td>
-                        <td style={{ padding: 10 }}>{d.name || "-"}</td>
+                        <td style={{ padding: 10 }}>
+                          <div style={{ lineHeight: 1.2 }}>{d.name || "-"}</div>
+                          {(d.furigana ||
+                            (d.name_raw && d.name_raw !== d.name)) && (
+                            <div
+                              style={{
+                                fontSize: 12,
+                                color: "#888",
+                                marginTop: 4,
+                              }}
+                            >
+                              {d.furigana
+                                ? `（ふりがな: ${d.furigana}）`
+                                : d.name_raw}
+                            </div>
+                          )}
+                        </td>
                         <td style={{ padding: 10 }}>{d.phone || "-"}</td>
                         <td style={{ padding: 10 }}>{d.gender || "-"}</td>
                         <td style={{ padding: 10 }}>{d.birth || "-"}</td>
@@ -457,30 +492,24 @@ export default function UnifiedHistoryPage() {
                           style={{
                             padding: 10,
                             color: "#555",
-                            whiteSpace: "pre-wrap",
-                            wordBreak: "break-word",
+                            whiteSpace: "nowrap",
+                            overflow: "hidden",
+                            textOverflow: "ellipsis",
                           }}
                         >
-                          <div>
-                            {d.raw ? JSON.stringify(d.raw).slice(0, 200) : "-"}
-                          </div>
-                          {d.sms_response ? (
-                            <div
-                              style={{
-                                marginTop: 6,
-                                fontSize: 12,
-                                color: "#444",
-                              }}
-                            >
+                          {smsInfo ? (
+                            <div style={{ fontSize: 13, color: "#444" }}>
                               <strong>SMS:</strong>{" "}
-                              {d.sms_sent ? "成功" : "失敗"} -{" "}
-                              {String(
-                                d.sms_response.output ||
-                                  d.sms_response.error ||
-                                  ""
-                              ).slice(0, 200)}
+                              {smsInfo.level === "success"
+                                ? "成功"
+                                : smsInfo.level === "failed"
+                                ? "失敗"
+                                : "エラー"}{" "}
+                              - {smsInfo.message}
                             </div>
-                          ) : null}
+                          ) : (
+                            <div style={{ color: "#999" }}>-</div>
+                          )}
                         </td>
                       </tr>
                     );

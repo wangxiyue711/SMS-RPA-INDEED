@@ -1,15 +1,43 @@
-import { NextRequest, NextResponse } from "next/server";
+// /src/app/api/rpa/personal-info/route.ts
+import { NextResponse } from "next/server";
 import { spawn } from "child_process";
 import path from "path";
 import fs from "fs";
 import os from "os";
 import { adminDb } from "../../../../lib/firebaseAdmin";
 
-export function POST(req: NextRequest): Promise<NextResponse> {
-  // 由于这个函数不是 async，先在这里做一个小的 async 初始化以读取 body 与 cfg
-  return (async () => {
-    const body = await req.json().catch(() => ({}));
+// 关键：声明 Node 运行时，避免 Edge 环境不允许 child_process/fs
+export const runtime = "nodejs";
+export const dynamic = "force-dynamic";
+// export const maxDuration = 900; // 可选，长任务
+
+export async function POST(req: Request): Promise<Response> {
+  // Early guard: Vercel / other serverless platforms normally do not allow
+  // spawning arbitrary child processes or bundling Python runtimes. If the
+  // app is deployed to Vercel, return a clear JSON error so the frontend
+  // doesn't attempt to parse an HTML error page (which causes the
+  // "Unexpected token" JSON parse error shown on the screenshot).
+  if (process.env.VERCEL || process.env.VERCEL_ENV) {
+    return NextResponse.json(
+      {
+        success: false,
+        error:
+          "This deployment environment (Vercel) does not support running the Python RPA worker. Deploy to a Node server or run the Python worker separately and POST results to the API.",
+      },
+      { status: 501 }
+    );
+  }
+  try {
+    // 关键：使用 Web 标准 Request，而不是 NextRequest
+    let body: any = {};
+    try {
+      body = await req.json();
+    } catch (_) {
+      body = {};
+    }
+
     const userUid = body.userUid || body.config?.user_id;
+
     // 从 Firestore 读取用户配置（server-side），优先使用 userUid
     let cfg: any = body.config || {};
     if (userUid) {
@@ -19,59 +47,49 @@ export function POST(req: NextRequest): Promise<NextResponse> {
           .doc(String(userUid))
           .get();
         if (snap.exists) cfg = { ...(snap.data() || {}), ...(cfg || {}) };
-      } catch (e) {
-        // ignore and continue with provided cfg
+      } catch (_) {
+        // 忽略，继续使用传入 cfg
       }
     }
 
-    return new Promise<NextResponse>((resolve) => {
-      const scriptPath = path.resolve(
-        process.cwd(),
-        "rpa_gmail_indeed_test.py"
-      );
-      const pythonCmd = process.env.RPA_PYTHON_CMD || "python";
+    const scriptPath = path.resolve(process.cwd(), "rpa_gmail_indeed_test.py");
+    const pythonCmd = process.env.RPA_PYTHON_CMD || "python";
 
-      // 将 cfg 写到临时文件，并以 --cfg-file=path 传入
-      const cfgFile = path.join(
-        os.tmpdir(),
-        `rpa_cfg_${Date.now()}_${Math.floor(Math.random() * 10000)}.json`
-      );
+    // 将 cfg 写到临时文件，并以 --cfg-file=path 传入
+    const cfgFile = path.join(
+      os.tmpdir(),
+      `rpa_cfg_${Date.now()}_${Math.floor(Math.random() * 10000)}.json`
+    );
+    try {
+      fs.writeFileSync(cfgFile, JSON.stringify({ config: cfg }), {
+        encoding: "utf8",
+      });
+    } catch (_) {
+      // ignore
+    }
+
+    // monitor 模式：后台 detached，立即返回 Response
+    if (cfg && cfg.monitor) {
       try {
-        fs.writeFileSync(cfgFile, JSON.stringify({ config: cfg }), {
-          encoding: "utf8",
+        const child = spawn(pythonCmd, [scriptPath, `--cfg-file=${cfgFile}`], {
+          detached: true,
+          stdio: "ignore",
+          windowsHide: true,
         });
-      } catch (e) {
-        // ignore
+        child.unref();
+        return NextResponse.json({ success: true, message: "monitor_started" });
+      } catch (e: any) {
+        return NextResponse.json(
+          { success: false, error: String(e) },
+          { status: 500 }
+        );
       }
+    }
 
-      // 如果 cfg 指定 monitor=true，则以 detached 后台进程启动并立即返回
-      if (cfg && cfg.monitor) {
-        try {
-          const child = spawn(
-            pythonCmd,
-            [scriptPath, `--cfg-file=${cfgFile}`],
-            {
-              detached: true,
-              stdio: "ignore",
-              windowsHide: true,
-            }
-          );
-          child.unref();
-          return resolve(
-            NextResponse.json({ success: true, message: "monitor_started" })
-          );
-        } catch (e) {
-          return resolve(
-            NextResponse.json(
-              { success: false, error: String(e) },
-              { status: 500 }
-            )
-          );
-        }
-      }
+    // 前台执行，收集输出
+    const py = spawn(pythonCmd, [scriptPath, `--cfg-file=${cfgFile}`]);
 
-      const py = spawn(pythonCmd, [scriptPath, `--cfg-file=${cfgFile}`]);
-
+    const promise: Promise<Response> = new Promise((resolve) => {
       let output = "";
       let error = "";
 
@@ -85,15 +103,15 @@ export function POST(req: NextRequest): Promise<NextResponse> {
 
       py.on("close", (code) => {
         try {
-          // foreground run 完成后尝试删除临时 cfg 文件
           if (fs.existsSync(cfgFile)) fs.unlinkSync(cfgFile);
-        } catch (e) {}
+        } catch (_) {}
+
         if (code === 0) {
-          // 尝试解析 python 输出为 JSON
+          // 尝试将 Python 标准输出解析为 JSON
           try {
             const parsed = JSON.parse(output);
             resolve(NextResponse.json({ success: true, data: parsed }));
-          } catch (e) {
+          } catch (_) {
             resolve(NextResponse.json({ success: true, data: output }));
           }
         } else {
@@ -106,24 +124,32 @@ export function POST(req: NextRequest): Promise<NextResponse> {
         }
       });
 
-      // 延长超时以支持网页抓取（例如 selenium 可能需要更久）
-      const timeout = 300000; // 5 分钟
-      const t = setTimeout(() => {
+      // 超时保护（例如 selenium 场景）
+      const timeoutMs = 300000; // 5 分钟
+      const timer = setTimeout(() => {
         try {
           py.kill();
-        } catch (e) {}
+        } catch (_) {}
         try {
           if (fs.existsSync(cfgFile)) fs.unlinkSync(cfgFile);
-        } catch (e) {}
+        } catch (_) {}
         resolve(
           NextResponse.json(
             { success: false, error: "脚本执行超时" },
             { status: 500 }
           )
         );
-      }, timeout);
+      }, timeoutMs);
 
-      py.on("exit", () => clearTimeout(t));
+      py.on("exit", () => clearTimeout(timer));
     });
-  })();
+
+    return promise; // 明确返回 Promise<Response>
+  } catch (e: any) {
+    // 捕获所有未处理异常并返回 JSON，以便前端能解析
+    return NextResponse.json(
+      { success: false, error: String(e?.message || e) },
+      { status: 500 }
+    );
+  }
 }

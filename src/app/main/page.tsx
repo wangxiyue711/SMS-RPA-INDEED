@@ -2,6 +2,8 @@
 "use client";
 
 import React, { useEffect, useMemo, useState, useCallback } from "react";
+import { getApps, initializeApp } from "firebase/app";
+import { getAuth, onAuthStateChanged } from "firebase/auth";
 
 // ------- 小工具：时间/格式 -------
 function toISO(d: Date) {
@@ -10,7 +12,10 @@ function toISO(d: Date) {
 function parseEpoch(v: any): number {
   if (typeof v === "number") return v;
   if (v && typeof v === "object") {
-    if (typeof v.seconds === "number") return v.seconds * 1000 + (v.nanoseconds ? Math.floor(v.nanoseconds / 1e6) : 0);
+    if (typeof v.seconds === "number")
+      return (
+        v.seconds * 1000 + (v.nanoseconds ? Math.floor(v.nanoseconds / 1e6) : 0)
+      );
     if (v instanceof Date) return v.getTime();
   }
   if (typeof v === "string") {
@@ -22,7 +27,7 @@ function parseEpoch(v: any): number {
 
 // ------- 类型 -------
 type SmsRow = {
-  createdAt?: any;  // Firestore Timestamp | epoch | ISO
+  createdAt?: any; // Firestore Timestamp | epoch | ISO
   created_at?: any;
   time?: any;
   phone?: string;
@@ -32,17 +37,25 @@ type SmsRow = {
   detail?: string;
   provider?: string;
 };
-type DataPoint = { date: string; total: number; success: number; failed: number };
+type DataPoint = {
+  date: string;
+  total: number;
+  success: number;
+  failed: number;
+};
 
 // ------- 组件 -------
 export default function TopDashboard() {
   // 默认日期：最近 60 天
   const today = useMemo(() => new Date(), []);
-  const sixtyAgo = useMemo(() => {
-    const t = new Date(); t.setDate(t.getDate() - 60); return t;
+  // 默认显示最近一周
+  const sevenAgo = useMemo(() => {
+    const t = new Date();
+    t.setDate(t.getDate() - 7);
+    return t;
   }, []);
 
-  const [from, setFrom] = useState<string>(toISO(sixtyAgo));
+  const [from, setFrom] = useState<string>(toISO(sevenAgo));
   const [to, setTo] = useState<string>(toISO(today));
   const [loading, setLoading] = useState(false);
   const [items, setItems] = useState<DataPoint[]>([]);
@@ -63,7 +76,10 @@ export default function TopDashboard() {
       const end = new Date(to);
       if (start > end) {
         setError("日付の範囲が正しくありません（開始 ＞ 終了）");
-        setItems([]); setSumTotal(0); setSumSuccess(0); setSumFailed(0);
+        setItems([]);
+        setSumTotal(0);
+        setSumSuccess(0);
+        setSumFailed(0);
         setLoading(false);
         return;
       }
@@ -75,30 +91,61 @@ export default function TopDashboard() {
         day.setDate(day.getDate() + 1);
       }
 
-      // 1) 优先使用服务器履历
-      let usedServer = false;
+      // 1) 优先使用服务器履历（需要 userUid）: 同时拉取 SMS 与 RPA，并将两者合并到同一日期桶
+      let serverFound = false;
       try {
-        const resp = await fetch(`/api/history/sms?from=${from}&to=${to}&limit=5000`);
-        if (resp.ok) {
-          const js = await resp.json();
-          const list: SmsRow[] = Array.isArray(js?.items) ? js.items : [];
-          for (const r of list) {
-            const ts = parseEpoch(r.createdAt ?? r.created_at ?? r.time);
-            const k = toISO(new Date(ts));
-            const dp = buckets.get(k);
-            if (!dp) continue;
-            dp.total += 1;
-            if (r.level === "success") dp.success += 1;
-            else if (r.level === "failed" || r.level === "error") dp.failed += 1;
-          }
-          usedServer = true;
+        const uid = (window as any).currentUser?.uid;
+        if (uid) {
+          // SMS
+          try {
+            const resp = await fetch(
+              `/api/history/sms?userUid=${encodeURIComponent(
+                uid
+              )}&from=${from}&to=${to}&limit=5000`
+            );
+            if (resp.ok) {
+              const js = await resp.json();
+              const list: SmsRow[] = Array.isArray(js?.items) ? js.items : [];
+              for (const r of list) {
+                const ts = parseEpoch(r.createdAt ?? r.created_at ?? r.time);
+                const k = toISO(new Date(ts));
+                const dp = buckets.get(k);
+                if (!dp) continue;
+                dp.total += 1; // count as an execution
+                if (r.level === "success") dp.success += 1;
+                else if (r.level === "failed" || r.level === "error")
+                  dp.failed += 1;
+              }
+              serverFound = true;
+            }
+          } catch {}
+
+          // RPA
+          try {
+            const resp = await fetch(
+              `/api/rpa/history?userUid=${encodeURIComponent(uid)}&limit=5000`
+            );
+            if (resp.ok) {
+              const js = await resp.json();
+              const rlist: any[] = Array.isArray(js?.items) ? js.items : [];
+              for (const r of rlist) {
+                const ts = parseEpoch(r.createdAt ?? r.time ?? Date.now());
+                const k = toISO(new Date(ts));
+                const dp = buckets.get(k);
+                if (!dp) continue;
+                // RPA counts toward executions but not SMS success/failed counts
+                dp.total += 1;
+              }
+              serverFound = true;
+            }
+          } catch {}
         }
-      } catch {
+      } catch (e) {
         // ignore
       }
 
       // 2) 如果没有服务器数据，就读取本地 localStorage
-      if (!usedServer) {
+      if (!serverFound) {
         try {
           const arr = JSON.parse(localStorage.getItem("smsHistory") || "[]");
           if (Array.isArray(arr)) {
@@ -124,7 +171,9 @@ export default function TopDashboard() {
       const rows = Array.from(buckets.values());
       const totals = rows.reduce(
         (acc, r) => {
-          acc.total += r.total; acc.success += r.success; acc.failed += r.failed;
+          acc.total += r.total;
+          acc.success += r.success;
+          acc.failed += r.failed;
           return acc;
         },
         { total: 0, success: 0, failed: 0 }
@@ -137,31 +186,89 @@ export default function TopDashboard() {
     } catch (e: any) {
       setError(e?.message || "読み込みに失敗しました");
       setItems([]);
-      setSumTotal(0); setSumSuccess(0); setSumFailed(0);
+      setSumTotal(0);
+      setSumSuccess(0);
+      setSumFailed(0);
     } finally {
       setLoading(false);
     }
   }, [from, to]);
 
-  useEffect(() => { refresh(); }, []); // 首次载入
-  const successRate = useMemo(() => (sumTotal ? (sumSuccess / sumTotal) * 100 : 0), [sumSuccess, sumTotal]);
-  const failedRate = useMemo(() => (sumTotal ? (sumFailed / sumTotal) * 100 : 0), [sumFailed, sumTotal]);
+  useEffect(() => {
+    refresh();
+  }, []); // 首次载入
+  // Firebase auth 初始化（用于获得 currentUser.uid）
+  useEffect(() => {
+    try {
+      if (getApps().length === 0) {
+        initializeApp({
+          apiKey: process.env.NEXT_PUBLIC_FIREBASE_API_KEY!,
+          authDomain: process.env.NEXT_PUBLIC_FIREBASE_AUTH_DOMAIN!,
+          projectId: process.env.NEXT_PUBLIC_FIREBASE_PROJECT_ID!,
+          storageBucket: process.env.NEXT_PUBLIC_FIREBASE_STORAGE_BUCKET!,
+          messagingSenderId:
+            process.env.NEXT_PUBLIC_FIREBASE_MESSAGING_SENDER_ID!,
+          appId: process.env.NEXT_PUBLIC_FIREBASE_APP_ID!,
+          measurementId: process.env.NEXT_PUBLIC_FIREBASE_MEASUREMENT_ID,
+        });
+      }
+      const auth = getAuth();
+      const unsub = onAuthStateChanged(auth, (user) => {
+        if (user) {
+          (window as any).currentUser = user;
+          // uid 可用时刷新一次数据以确保 server-side history 被读取
+          refresh();
+        }
+      });
+      return () => unsub();
+    } catch {
+      // silently ignore if firebase not configured
+    }
+  }, [refresh]);
+  const successRate = useMemo(
+    () => (sumTotal ? (sumSuccess / sumTotal) * 100 : 0),
+    [sumSuccess, sumTotal]
+  );
+  const failedRate = useMemo(
+    () => (sumTotal ? (sumFailed / sumTotal) * 100 : 0),
+    [sumFailed, sumTotal]
+  );
 
   // 简易 SVG 折线图（总量）
   const Chart = () => {
     const data = items;
-    const W = 760, H = 160, pad = 20;
-    const max = Math.max(1, ...data.map(d => d.total));
-    const x = (i: number) => pad + (i * (W - pad * 2)) / Math.max(1, data.length - 1);
+    const W = 760,
+      H = 160,
+      pad = 20;
+    const max = Math.max(1, ...data.map((d) => d.total));
+    const x = (i: number) =>
+      pad + (i * (W - pad * 2)) / Math.max(1, data.length - 1);
     const y = (v: number) => H - pad - (v * (H - pad * 2)) / max;
-    const path = data.map((d, i) => `${i === 0 ? "M" : "L"} ${x(i)} ${y(d.total)}`).join(" ");
-    const area = `M ${x(0)} ${y(0)} ${path.slice(1)} L ${x(data.length - 1)} ${H - pad} L ${x(0)} ${H - pad} Z`;
+    const path = data
+      .map((d, i) => `${i === 0 ? "M" : "L"} ${x(i)} ${y(d.total)}`)
+      .join(" ");
+    const area = `M ${x(0)} ${y(0)} ${path.slice(1)} L ${x(data.length - 1)} ${
+      H - pad
+    } L ${x(0)} ${H - pad} Z`;
 
     return (
-      <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={H} role="img" aria-label="送信回数の推移">
+      <svg
+        viewBox={`0 0 ${W} ${H}`}
+        width="100%"
+        height={H}
+        role="img"
+        aria-label="送信回数の推移"
+      >
         {/* grid lines */}
         {[0.25, 0.5, 0.75].map((r) => (
-          <line key={r} x1={pad} x2={W - pad} y1={pad + r * (H - pad * 2)} y2={pad + r * (H - pad * 2)} stroke="#eef1e6" />
+          <line
+            key={r}
+            x1={pad}
+            x2={W - pad}
+            y1={pad + r * (H - pad * 2)}
+            y2={pad + r * (H - pad * 2)}
+            stroke="#eef1e6"
+          />
         ))}
         {/* area */}
         <path d={area} fill="url(#g1)" opacity="0.6" />
@@ -184,35 +291,87 @@ export default function TopDashboard() {
   return (
     <div>
       {/* 日期筛选 */}
-      <div style={{ display: "flex", gap: 12, alignItems: "center", marginBottom: 12, flexWrap: "wrap" }}>
+      <div
+        style={{
+          display: "flex",
+          gap: 12,
+          alignItems: "center",
+          marginBottom: 12,
+          flexWrap: "wrap",
+        }}
+      >
         <input
-          type="date" value={from} onChange={(e) => setFrom(e.target.value)}
-          style={{ padding: "10px 12px", border: "2px solid #e8eae0", borderRadius: 8, background: "#fff" }}
+          type="date"
+          value={from}
+          onChange={(e) => setFrom(e.target.value)}
+          style={{
+            padding: "10px 12px",
+            border: "2px solid #e8eae0",
+            borderRadius: 8,
+            background: "#fff",
+          }}
         />
         <span style={{ color: "#8aa06b" }}>—</span>
         <input
-          type="date" value={to} onChange={(e) => setTo(e.target.value)}
-          style={{ padding: "10px 12px", border: "2px solid #e8eae0", borderRadius: 8, background: "#fff" }}
+          type="date"
+          value={to}
+          onChange={(e) => setTo(e.target.value)}
+          style={{
+            padding: "10px 12px",
+            border: "2px solid #e8eae0",
+            borderRadius: 8,
+            background: "#fff",
+          }}
         />
         <button
           onClick={refresh}
-          style={{ padding: "10px 14px", borderRadius: 8, border: "1px solid #e6e8d9", background: "#fff", cursor: "pointer" }}
+          style={{
+            padding: "10px 14px",
+            borderRadius: 8,
+            border: "1px solid #e6e8d9",
+            background: "#fff",
+            cursor: "pointer",
+          }}
         >
           🔄 取得
         </button>
       </div>
 
       {/* 指标卡 + 图表 */}
-      <div style={{ border: "1px solid #e6e8d9", background: "#fff", borderRadius: 16, padding: 16, boxShadow: "0 2px 10px rgba(0,0,0,.03)" }}>
-        <div style={{ display: "grid", gridTemplateColumns: "repeat(3, minmax(0,1fr))", gap: 14 }}>
+      <div
+        style={{
+          border: "1px solid #e6e8d9",
+          background: "#fff",
+          borderRadius: 16,
+          padding: 16,
+          boxShadow: "0 2px 10px rgba(0,0,0,.03)",
+        }}
+      >
+        <div
+          style={{
+            display: "grid",
+            gridTemplateColumns: "repeat(3, minmax(0,1fr))",
+            gap: 14,
+          }}
+        >
           <StatCard title="⚙ 実行数" value={sumTotal} sub="" />
-          <StatCard title="💡 送信成功数" value={sumSuccess} sub={`${successRate.toFixed(2)}%`} />
-          <StatCard title="❌ 送信失敗数" value={sumFailed} sub={`${failedRate.toFixed(2)}%`} />
+          <StatCard
+            title="💡 送信成功数"
+            value={sumSuccess}
+            sub={`${successRate.toFixed(2)}%`}
+          />
+          <StatCard
+            title="❌ 送信失敗数"
+            value={sumFailed}
+            sub={`${failedRate.toFixed(2)}%`}
+          />
         </div>
 
         <div style={{ marginTop: 10 }}>
           {loading ? (
-            <div style={{ color: "#666", padding: "24px 0" }}>読み込み中...</div>
+            <div style={{ color: "#666", padding: "24px 0" }}>
+              読み込み中...
+            </div>
           ) : (
             <Chart />
           )}
@@ -220,19 +379,38 @@ export default function TopDashboard() {
 
         {/* X 轴刻度（每隔若干天显示一下） */}
         {!loading && (
-          <div style={{ display: "flex", justifyContent: "space-between", marginTop: -6, padding: "0 8px", color: "#8aa06b", fontSize: 12 }}>
-            {items.map((d, i) => (i % Math.ceil(items.length / 8 || 1) === 0 ? <span key={d.date}>{d.date.slice(5)}</span> : <span key={i} />))}
+          <div
+            style={{
+              display: "flex",
+              justifyContent: "space-between",
+              marginTop: -6,
+              padding: "0 8px",
+              color: "#8aa06b",
+              fontSize: 12,
+            }}
+          >
+            {items.map((d, i) =>
+              i % Math.ceil(items.length / 8 || 1) === 0 ? (
+                <span key={d.date}>{d.date.slice(5)}</span>
+              ) : (
+                <span key={i} />
+              )
+            )}
           </div>
         )}
       </div>
 
       {/* 错误信息 */}
-      {error && <div style={{ color: "#d32f2f", marginTop: 10 }}>❌ {error}</div>}
+      {error && (
+        <div style={{ color: "#d32f2f", marginTop: 10 }}>❌ {error}</div>
+      )}
 
       {/* 响应式微调 */}
       <style jsx>{`
         @media (max-width: 960px) {
-          .grid-3 { grid-template-columns: 1fr !important; }
+          .grid-3 {
+            grid-template-columns: 1fr !important;
+          }
         }
       `}</style>
     </div>
@@ -240,17 +418,42 @@ export default function TopDashboard() {
 }
 
 // --- 指标卡 ---
-function StatCard({ title, value, sub }: { title: string; value: number; sub?: string }) {
+function StatCard({
+  title,
+  value,
+  sub,
+}: {
+  title: string;
+  value: number;
+  sub?: string;
+}) {
   return (
-    <div style={{
-      border: "1px solid #eef1e6",
-      borderRadius: 12,
-      padding: 12,
-      background: "linear-gradient(180deg,#fbfcf7 0%, #ffffff 60%)"
-    }}>
-      <div style={{ color: "#8aa06b", fontSize: 12, marginBottom: 4 }}>{title}</div>
-      <div style={{ fontSize: 36, fontWeight: 800, color: "#6f8333", lineHeight: 1.1 }}>{value.toLocaleString()}</div>
-      {sub ? <div style={{ fontSize: 12, color: "#8aa06b", marginTop: 4 }}>{sub}</div> : null}
+    <div
+      style={{
+        border: "1px solid #eef1e6",
+        borderRadius: 12,
+        padding: 12,
+        background: "linear-gradient(180deg,#fbfcf7 0%, #ffffff 60%)",
+      }}
+    >
+      <div style={{ color: "#8aa06b", fontSize: 12, marginBottom: 4 }}>
+        {title}
+      </div>
+      <div
+        style={{
+          fontSize: 36,
+          fontWeight: 800,
+          color: "#6f8333",
+          lineHeight: 1.1,
+        }}
+      >
+        {value.toLocaleString()}
+      </div>
+      {sub ? (
+        <div style={{ fontSize: 12, color: "#8aa06b", marginTop: 4 }}>
+          {sub}
+        </div>
+      ) : null}
     </div>
   );
 }

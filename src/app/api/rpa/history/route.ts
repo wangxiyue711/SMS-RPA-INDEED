@@ -80,6 +80,114 @@ export async function POST(req: NextRequest) {
     const batch = adminDb.batch ? adminDb.batch() : null;
 
     const now = Date.now();
+    // 读取用户的 target_rules（如果有），用来决定是否应发送短信
+    const userData =
+      userCfgSnap.exists && userCfgSnap.data() ? userCfgSnap.data() || {} : {};
+    const targetRules: any = userData.target_rules || {};
+
+    function nameMatchesChecks(name: string, checks: any) {
+      if (!name || !checks) return null;
+      // 去掉括号内的振り仮名/読み仮名等（支持全角和半角括号）
+      const sRaw = String(name || "").trim();
+      const s = sRaw.replace(/\（.*?\）|\(.*?\)/g, "").trim();
+      if (!s) return null;
+      const hasKanji = /[\u4e00-\u9fff]/.test(s);
+      const hasKatakana = /[\u30A0-\u30FF]/.test(s);
+      const hasHiragana = /[\u3040-\u309F]/.test(s);
+      // 对英文字母的判断：如果姓或名任一包含英文字母，则视为 alphabet
+      const parts = s.split(/\s+/).filter(Boolean);
+      const family = parts[0] || "";
+      const given = parts[1] || "";
+      const hasAlpha = /[A-Za-z]/.test(family) || /[A-Za-z]/.test(given);
+      // If any check is true, treat as OR: match if any selected type is present. If none selected, return null (no opinion)
+      const anySelected = !!(
+        checks.kanji ||
+        checks.katakana ||
+        checks.hiragana ||
+        checks.alphabet
+      );
+      if (!anySelected) return null;
+      if (checks.kanji && hasKanji) return true;
+      if (checks.katakana && hasKatakana) return true;
+      if (checks.hiragana && hasHiragana) return true;
+      if (checks.alphabet && hasAlpha) return true;
+      return false;
+    }
+
+    function normalizeGender(g: any) {
+      if (!g) return null;
+      const s = String(g).toLowerCase();
+      if (s.includes("男") || s.includes("male")) return "male";
+      if (s.includes("女") || s.includes("female")) return "female";
+      return null;
+    }
+
+    function evaluateByRules(r: any) {
+      if (!targetRules) return null;
+      const tr = targetRules;
+      const nameChecks = tr?.nameChecks || {};
+      const ageRules = tr?.age || {};
+
+      // Determine if name rules configured
+      const nameConfigured = !!(
+        nameChecks &&
+        (nameChecks.kanji ||
+          nameChecks.katakana ||
+          nameChecks.hiragana ||
+          nameChecks.alphabet)
+      );
+      const name = r.name || r["姓名（ふりがな）"] || "";
+      const nm = nameMatchesChecks(name, nameChecks);
+      const namePass = nameConfigured ? nm === true : true; // if not configured -> pass
+
+      // Gender/age rules
+      const gender = normalizeGender(r.gender || r["性別"] || "");
+      const ageVal = (() => {
+        const a = r.age || r["__標準_年齢__"] || r["age"] || "";
+        const n =
+          typeof a === "number"
+            ? a
+            : parseInt(String(a).replace(/[^0-9]/g, ""), 10);
+        return Number.isFinite(n) ? n : null;
+      })();
+
+      let genderConfigured = false;
+      let genderPass = true;
+      if (gender && ageRules && ageRules[gender]) {
+        const gRuleRaw = ageRules[gender] || {};
+        genderConfigured = !!(
+          typeof gRuleRaw.include === "boolean" ||
+          typeof gRuleRaw.skip === "boolean" ||
+          gRuleRaw.min != null ||
+          gRuleRaw.max != null
+        );
+
+        // determine include flag: prefer explicit include, otherwise if skip exists invert it
+        let includeFlag: boolean | null = null;
+        if (typeof gRuleRaw.include === "boolean")
+          includeFlag = !!gRuleRaw.include;
+        else if (typeof gRuleRaw.skip === "boolean")
+          includeFlag = !gRuleRaw.skip;
+
+        if (includeFlag === false) genderPass = false;
+
+        const min = gRuleRaw?.min != null ? Number(gRuleRaw.min) : null;
+        const max = gRuleRaw?.max != null ? Number(gRuleRaw.max) : null;
+        if (min != null || max != null) {
+          if (ageVal === null) genderPass = false;
+          if (min != null && ageVal != null && ageVal < min) genderPass = false;
+          if (max != null && ageVal != null && ageVal > max) genderPass = false;
+        }
+      }
+
+      const anyRuleConfigured = nameConfigured || genderConfigured;
+      if (!anyRuleConfigured) return null;
+
+      // require all configured groups to pass
+      if (!namePass) return false;
+      if (!genderPass) return false;
+      return true;
+    }
     const saved: any[] = [];
     for (const r of results) {
       const docId = String(now) + "-" + Math.random().toString(36).slice(2, 9);
@@ -98,12 +206,46 @@ export async function POST(req: NextRequest) {
         phoneDigits.length >= 7 && (ageVal === null || ageVal >= 18);
       const script_declared =
         typeof r.should_send_sms !== "undefined" ? !!r.should_send_sms : null;
-      const is_sms_target =
-        script_declared === null ? backend_is_sms_target : script_declared;
+
+      // Evaluate user-defined rules (null = no opinion, true = allow, false = disallow)
+      const ruleDecision = evaluateByRules(r);
+
+      let is_sms_target: boolean;
+      if (script_declared !== null) {
+        // If script explicitly declared, respect it unless user rules explicitly disallow
+        if (ruleDecision === false) {
+          is_sms_target = false;
+        } else if (ruleDecision === true) {
+          is_sms_target = true && script_declared;
+        } else {
+          is_sms_target = script_declared;
+        }
+      } else {
+        // No script opinion: prefer user rules if present, otherwise fallback to backend simple rule
+        if (ruleDecision !== null) {
+          is_sms_target = ruleDecision;
+        } else {
+          is_sms_target = backend_is_sms_target;
+        }
+      }
+
+      // prepare name variants: raw (may include ふりがな in parentheses), clean (parentheses removed), and furigana extracted
+      const rawName = r.name || r["姓名（ふりがな）"] || "";
+      const furiganaMatch = String(rawName).match(
+        /(?:\(|\（)\s*([^\)\）]+?)\s*(?:\)|\）)\s*$/
+      );
+      const furigana = furiganaMatch ? furiganaMatch[1].trim() : null;
+      const cleanName = String(rawName)
+        .replace(/\（.*?\）|\(.*?\)/g, "")
+        .trim();
 
       const payload: any = {
         createdAt: now,
-        name: r.name || r["姓名（ふりがな）"] || "",
+        // `name` keeps the cleaned display name (parentheses removed) for UI display
+        name: cleanName || rawName || "",
+        // preserve originals for audit and optional display
+        name_raw: rawName || "",
+        furigana: furigana,
         phone: phoneRaw,
         gender: r.gender || r["性別"] || "",
         birth: r.birth || r["生年月日"] || "",
@@ -114,6 +256,18 @@ export async function POST(req: NextRequest) {
         is_sms_target,
         level: r.level || "success",
         raw: r,
+        decision_debug: {
+          script_declared,
+          backend_is_sms_target,
+          ruleDecision: ruleDecision === undefined ? null : ruleDecision,
+          final_is_sms_target: is_sms_target,
+          appliedTargetRules: targetRules,
+          observed: {
+            age: ageVal,
+            gender: normalizeGender(r.gender || r["性別"] || ""),
+            name: r.name || r["姓名（ふりがな）"] || "",
+          },
+        },
       };
 
       // 若为 SMS 目标并且用户有配置 SMS 提供商，则尝试发送短信
@@ -122,6 +276,8 @@ export async function POST(req: NextRequest) {
           const apiUrl = String(smsConfig.api_url || "").trim();
           const apiId = String(smsConfig.api_id || "").trim();
           const apiPass = String(smsConfig.api_password || "").trim();
+
+          // SMS will be attempted when the user has provided api_url/api_id/api_password
           if (apiUrl && apiId && apiPass) {
             const useReport =
               smsConfig.use_delivery_report === true ||
@@ -132,33 +288,12 @@ export async function POST(req: NextRequest) {
 
             const smsTextA = (smsConfig.sms_text_a || "").trim();
             const smsTextB = (smsConfig.sms_text_b || "").trim();
-            // 构造消息规则：
-            // - 仅当模板中显式包含占位符（如 {name}, {{name}}, $name, %NAME%）时把姓名替换进模板
-            // - 否则按模板原样拼接（避免无端插入姓名）
-            const namePart = payload.name ? String(payload.name).trim() : "";
-            function renderWithNameIfNeeded(tpl: string) {
-              if (!tpl) return "";
-              const placeholderRE =
-                /\{\{\s*name\s*\}\}|\{\s*name\s*\}|\$name|%NAME%/i;
-              if (placeholderRE.test(tpl)) {
-                return tpl.replace(
-                  /\{\{\s*name\s*\}\}|\{\s*name\s*\}|\$name|%NAME%/gi,
-                  namePart
-                );
-              }
-              return tpl;
-            }
+            let message =
+              smsTextA ||
+              smsTextB ||
+              "こんにちは。ご応募ありがとうございます。";
+            message = String(message).trim();
 
-            const aRendered = renderWithNameIfNeeded(smsTextA);
-            const bRendered = renderWithNameIfNeeded(smsTextB);
-            let message = [aRendered, bRendered]
-              .filter(Boolean)
-              .join(" ")
-              .trim();
-            // 如果模板均为空但有姓名，则使用一个默认问候
-            if (!message && namePart) message = `こんにちは。${namePart}`;
-
-            // 发送函数（与 /api/sms/send 保持一致行为）
             async function postOnce(mobile: string) {
               const bodyForm = new URLSearchParams();
               bodyForm.set("mobilenumber", mobile);
@@ -227,9 +362,8 @@ export async function POST(req: NextRequest) {
               return { resp, text };
             }
 
-            // 先试本地格式
+            // attempt local format
             let sendRes = await postOnce(localNum);
-            // 若返回特定号码无效代码（560），再试 81 格式
             if (sendRes.resp && sendRes.resp.status === 560) {
               const alt = to81FromLocal(localNum);
               const retry = await postOnce(alt);

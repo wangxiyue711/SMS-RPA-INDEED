@@ -108,8 +108,8 @@ const code_map: Record<number, string> = {
   669: "Memo值无效",
   670: "Memo2值无效",
   671: "Memo3值无效",
-  672: "Memo4值无效",
-  673: "Memo5值无效",
+  672: "Memo4无效",
+  673: "Memo5无效",
 };
 
 export async function POST(req: NextRequest) {
@@ -229,14 +229,42 @@ export async function POST(req: NextRequest) {
       text = retry.text;
     }
 
+    // 构造要记录到 Firestore 的 payload（无论发送成功与否都记录）
+    const now = Date.now();
+    const id = String(now) + "-" + Math.random().toString(36).slice(2, 8);
+    const payload: any = {
+      createdAt: now,
+      phone,
+      messageExcerpt: String(message || "").substring(0, 4000),
+      provider: smsConfig.provider || null,
+      rawRequest: { phone, message },
+      sms_sent: !!resp.ok,
+      sms_response: {
+        status: resp.status,
+        output: String(text).slice(0, 4000),
+      },
+      sms_message: String(message || ""),
+      level: resp.ok ? "success" : "failed",
+    };
+
+    try {
+      const colRef = adminDb
+        .collection("sms_history")
+        .doc(String(userUid))
+        .collection("entries");
+      await colRef.doc(id).set(payload);
+    } catch (e) {
+      // 忽略写入错误（不会阻塞响应）
+    }
+
     if (!resp.ok) {
       const errorMessage = code_map[resp.status] || `HTTP ${resp.status}`;
       return NextResponse.json(
         {
           success: false,
           error: `${errorMessage} (${resp.status})`,
-          details: text.slice(0, 2000),
-          debug: { apiUrl, triedLocal: local, usedReport: !!useReport },
+          details: String(text).slice(0, 2000),
+          recorded: payload,
         },
         { status: 502 }
       );
@@ -247,8 +275,9 @@ export async function POST(req: NextRequest) {
     return NextResponse.json({
       success: true,
       status: resp.status,
-      statusMessage: statusMessage,
-      output: text.slice(0, 4000),
+      statusMessage,
+      output: String(text).slice(0, 4000),
+      recorded: payload,
     });
   } catch (e: any) {
     return NextResponse.json(
