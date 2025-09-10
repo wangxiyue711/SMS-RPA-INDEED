@@ -32,8 +32,8 @@ export const DEFAULT_ITEMS: SidebarItem[] = [
     children: [
       { key: "account", label: "アカウント設定 ", href: "/main/account" },
       { key: "sms", label: "SMS設定 ", href: "/main/sms" },
-      { key: "target", label: "対象設定  ❌", href: "/main/target" },
-      { key: "rpa", label: "RPA実行 ❌", href: "/main/rpa" },
+      { key: "target", label: "対象設定 ", href: "/main/target" },
+      { key: "rpa", label: "RPA実行 ", href: "/main/rpa" },
     ],
   },
   { key: "send", label: "個別送信 ", href: "/main/send" },

@@ -25,11 +25,13 @@ os.environ.setdefault('PYTHONIOENCODING', 'utf-8')
 
 # ========= 配置 =========
 IMAP_HOST = "imap.gmail.com"
-IMAP_USER = "wangxiyue0711@gmail.com"
-IMAP_PASS = "dvmwjjztjeqnwslf"
+# 不在源码中保存敏感凭据，默认留空。
+IMAP_USER = ""
+IMAP_PASS = ""
 
-SITE_USER = os.environ.get('SITE_USER', 'info@rec-lab.biz')
-SITE_PASS = os.environ.get('SITE_PASS', 'reclab0601')
+# SITE_USER/PASS 可通过环境或远端配置注入
+SITE_USER = os.environ.get('SITE_USER', '')
+SITE_PASS = os.environ.get('SITE_PASS', '')
 
 SUBJECT_KEYWORD = "【新しい応募者のお知らせ】"
 ALLOWED_DOMAINS = {"indeed.com", "jp.indeed.com", "indeedemail.com", "cts.indeed.com"}
@@ -64,19 +66,62 @@ try:
 except Exception:
     cfg = cfg or {}
 
+
+def try_fetch_cfg_from_firestore_if_available(user_uid: str):
+    """尝试使用 GOOGLE_APPLICATION_CREDENTIALS 拉取 Firestore 中的 user_configs/{user_uid} 文档。
+    若环境或依赖不可用则返回 None。
+    """
+    try:
+        import firebase_admin
+        from firebase_admin import credentials, firestore
+    except Exception:
+        return None
+
+    try:
+        if not firebase_admin._apps:
+            cred_path = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS')
+            if not cred_path or not os.path.exists(cred_path):
+                return None
+            cred = credentials.Certificate(cred_path)
+            firebase_admin.initialize_app(cred)
+
+        db = firestore.client()
+        doc = db.collection('user_configs').document(str(user_uid)).get()
+        if not doc.exists:
+            return None
+        return doc.to_dict()
+    except Exception:
+        return None
+
+
 # 应用配置到变量
 try:
     if isinstance(cfg, dict):
         IMAP_USER = cfg.get('email_config', {}).get('address') or cfg.get('IMAP_USER') or IMAP_USER
         IMAP_PASS = cfg.get('email_config', {}).get('app_password') or cfg.get('IMAP_PASS') or IMAP_PASS
-        SITE_USER = cfg.get('email_config', {}).get('address') or cfg.get('SITE_USER') if 'SITE_USER' in locals() else cfg.get('email_config', {}).get('address')
-        SITE_PASS = cfg.get('email_config', {}).get('site_password') or cfg.get('SITE_PASS') if 'SITE_PASS' in locals() else cfg.get('email_config', {}).get('site_password')
+        SITE_USER = cfg.get('email_config', {}).get('address') or SITE_USER
+        SITE_PASS = cfg.get('email_config', {}).get('site_password') or SITE_PASS
         SUBJECT_KEYWORD = cfg.get('SUBJECT_KEYWORD') or SUBJECT_KEYWORD
         domains = cfg.get('ALLOWED_DOMAINS')
         if isinstance(domains, (list, tuple)):
             ALLOWED_DOMAINS = set(domains)
         elif isinstance(domains, str):
             ALLOWED_DOMAINS = set(x.strip() for x in domains.split(','))
+
+    # 当没有从命令行/stdin 获得凭据时，尝试通过环境变量 USER_UID + 服务账号从 Firestore 读取
+    if (not cfg or not isinstance(cfg, dict) or not cfg.get('email_config')) and os.environ.get('USER_UID'):
+        fetched = try_fetch_cfg_from_firestore_if_available(os.environ.get('USER_UID'))
+        if fetched and isinstance(fetched, dict):
+            cfg = {**(fetched or {}), **(cfg or {})}
+            IMAP_USER = cfg.get('email_config', {}).get('address') or IMAP_USER
+            IMAP_PASS = cfg.get('email_config', {}).get('app_password') or IMAP_PASS
+            SITE_USER = cfg.get('email_config', {}).get('address') or SITE_USER
+            SITE_PASS = cfg.get('email_config', {}).get('site_password') or SITE_PASS
+
+    # 安全策略：如果最终没有 IMAP_USER/IMAP_PASS，则停止并返回错误，避免回退到源码中可能的敏感值
+    if not IMAP_USER or not IMAP_PASS:
+        print("ERROR: no IMAP credentials provided. Provide --cfg-file, stdin JSON with email_config, or set USER_UID + GOOGLE_APPLICATION_CREDENTIALS to fetch from Firestore.", file=sys.stderr)
+        sys.exit(2)
 except Exception:
     pass
 

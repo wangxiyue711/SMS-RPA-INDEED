@@ -68,6 +68,7 @@ export default function UnifiedHistoryPage() {
     }
     return Date.now();
   }
+
   function fmtJa(ts: number) {
     return new Date(ts).toLocaleString("ja-JP");
   }
@@ -81,40 +82,14 @@ export default function UnifiedHistoryPage() {
       const unified: UnifiedItem[] = [];
 
       // 1) 個別送信（ローカル）
-      try {
-        const local = JSON.parse(localStorage.getItem("smsHistory") || "[]");
-        if (Array.isArray(local)) {
-          for (const it of local) {
-            const ts = toEpoch(it.timestamp ?? it.time ?? Date.now());
-            const title = `📱 ${it.phone || "-"} — ${String(
-              it.message || ""
-            ).trim()}`;
-            const level =
-              it.status === "success"
-                ? "success"
-                : it.status === "failed"
-                ? "failed"
-                : it.status === "error"
-                ? "error"
-                : "info";
-            unified.push({
-              id: `sms-local-${ts}-${it.phone || ""}-${Math.random()
-                .toString(36)
-                .slice(2, 7)}`,
-              timeEpoch: ts,
-              timeText: fmtJa(ts),
-              kind: "sms",
-              level,
-              title,
-              detail: it.statusInfo || undefined,
-            });
-          }
-        }
-      } catch {}
+      // NOTE: localStorage-based local SMS history has been deprecated for
+      // display. History now uses server-backed entries (/api/history/sms).
 
       // 2) 個別送信（サーバー・存在すれば）
       try {
-        const resp = await fetch(`/api/history/sms?limit=1000`);
+        const resp = await fetch(
+          `/api/history/sms?userUid=${encodeURIComponent(uid)}&limit=1000`
+        );
         if (resp.ok) {
           const data = await resp.json();
           const rows: ServerSms[] = Array.isArray(data?.items)
@@ -231,6 +206,33 @@ export default function UnifiedHistoryPage() {
   // uid/rpaLimit 变化重新拉
   useEffect(() => {
     refresh();
+  }, [refresh]);
+
+  // Auto-refresh when other tabs/pages send an SMS: listen via BroadcastChannel
+  useEffect(() => {
+    try {
+      const bc = new BroadcastChannel("sms-events");
+      const onMsg = (ev: any) => {
+        try {
+          if (ev?.data?.type === "sms:sent") refresh();
+        } catch {}
+      };
+      bc.addEventListener("message", onMsg);
+      // Also listen to storage events as a fallback
+      const onStorage = (e: StorageEvent) => {
+        if (e.key === "smsHistory") refresh();
+      };
+      window.addEventListener("storage", onStorage);
+      return () => {
+        try {
+          bc.removeEventListener("message", onMsg);
+          bc.close();
+        } catch {}
+        window.removeEventListener("storage", onStorage);
+      };
+    } catch {
+      // ignore if environment doesn't support BroadcastChannel
+    }
   }, [refresh]);
 
   // ---------- 过滤与搜索 ----------
@@ -358,6 +360,7 @@ export default function UnifiedHistoryPage() {
           >
             🔄 取得
           </button>
+          {/* ローカル同期ボタンは削除しました。履歴はサーバー側のデータを表示します。 */}
           <button
             onClick={exportCSV}
             style={{

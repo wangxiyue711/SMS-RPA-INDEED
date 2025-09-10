@@ -114,6 +114,19 @@ export default function IndividualSendPage() {
           arr.unshift(entry);
           if (arr.length > 100) arr.length = 100;
           localStorage.setItem("smsHistory", JSON.stringify(arr));
+          try {
+            // Broadly notify other open pages (same origin) that a send occurred.
+            // history page listens and will refresh automatically.
+            const bc = new BroadcastChannel("sms-events");
+            bc.postMessage({
+              type: "sms:sent",
+              entry,
+              recorded: data?.recorded ?? null,
+            });
+            bc.close();
+          } catch {
+            /* ignore if BroadcastChannel not supported */
+          }
         } catch {
           /* 忽略本地写入错误 */
         }
