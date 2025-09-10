@@ -57,6 +57,8 @@ export default function RpaPage() {
   ]);
 
   const allPass = useMemo(() => checks.every((c) => c.pass === true), [checks]);
+  const [isPersonalHover, setIsPersonalHover] = useState(false);
+  const [personalInfoRunning, setPersonalInfoRunning] = useState(false);
 
   // 读取 Firestore 的兜底方法（若未挂载 window.FirebaseAPI 时使用）
   async function getUserConfigFallback() {
@@ -294,16 +296,14 @@ export default function RpaPage() {
   // ------- 打开日志 -------
   function openLogs() {
     if (!userUid) return;
-    window.open(
-      `/api/rpa/logs/${userUid}?limit=200`,
-      "rpaLogs",
-      "width=900,height=700,scrollbars=yes"
-    );
+    // Open logs in the current tab instead of a new popup window
+    window.location.href = `/api/rpa/logs/${userUid}?limit=200`;
   }
 
   // ------- 個人情報ボタンハンドラ -------
   async function handlePersonalInfo() {
-    setStatusText("個人情報を取得中...");
+    // set a local running flag so UI can show small helper text and hover is styled
+    setPersonalInfoRunning(true);
     try {
       const FirebaseAPI = (window as any).FirebaseAPI;
       const cfg = FirebaseAPI?.getUserConfig
@@ -317,14 +317,20 @@ export default function RpaPage() {
           userUid: (window as any).currentUser?.uid || cfg.user_id,
         }),
       });
-      const data = await resp.json();
-      if (data.success) {
+      let data: any;
+      try {
+        data = await resp.json();
+      } catch (e) {
+        data = { success: false };
+      }
+
+      if (data && data.success) {
         const results = Array.isArray(data.data?.results)
           ? data.data.results
           : Array.isArray(data.results)
           ? data.results
           : [];
-        // 1) save to server-side history
+        // save to server-side history silently
         try {
           await fetch("/api/rpa/history", {
             method: "POST",
@@ -334,19 +340,16 @@ export default function RpaPage() {
               results,
             }),
           });
-        } catch {}
-
-        // localStorage 写入已移除：历史存储以云端 Firestore 为准
-
-        setStatusText("✅ 個人情報取得完了");
-        // navigate to history page to show table
-        window.location.href = "/main/history";
-      } else {
-        setStatusText("❌ 個人情報取得失敗");
+        } catch (e) {
+          // ignore
+        }
       }
-    } catch (e: any) {
-      window.alert("取得失敗: " + (e?.message || e));
-      setStatusText("❌ 個人情報取得失敗");
+    } catch (e) {
+      // silent; log for debugging
+      // eslint-disable-next-line no-console
+      console.error("personal-info error", e);
+    } finally {
+      setPersonalInfoRunning(false);
     }
   }
 
@@ -488,15 +491,27 @@ export default function RpaPage() {
           <button
             type="button"
             onClick={handlePersonalInfo}
+            onMouseEnter={() => setIsPersonalHover(true)}
+            onMouseLeave={() => setIsPersonalHover(false)}
             style={{
               padding: "8px 12px",
               borderRadius: 8,
               border: "1px solid #e6e8d9",
-              background: "#fff",
+              background: isPersonalHover ? "#f6f9ef" : "#fff",
+              color: isPersonalHover ? "#2f5d1a" : "#000",
+              cursor: "pointer",
+              transition: "background 120ms ease, color 120ms ease",
             }}
           >
             🧾 個人情報
           </button>
+        </div>
+
+        {/* 小字说明：用户要求点击后显示个别信息正在取得（但不自动跳转） */}
+        <div style={{ marginTop: 8 }}>
+          {personalInfoRunning ? (
+            <div style={{ fontSize: 12, color: "#666" }}>個人情報取得中</div>
+          ) : null}
         </div>
 
         <div style={{ marginTop: 10, fontSize: 13, color: "#666" }}>

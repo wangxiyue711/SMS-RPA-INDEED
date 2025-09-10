@@ -2,6 +2,7 @@
 "use client";
 
 import React, { useEffect, useMemo, useState, useCallback } from "react";
+import { resolveSmsResult } from "../../../lib/smsCodes";
 import { getApps, initializeApp } from "firebase/app";
 import { getAuth, onAuthStateChanged } from "firebase/auth";
 // firebase/firestore client imports removed: history page now uses server API (/api/rpa/history)
@@ -430,6 +431,21 @@ export default function UnifiedHistoryPage() {
                 <tbody>
                   {rpaDocs.map((d) => {
                     const ts = toEpoch(d.createdAt ?? Date.now());
+                    // 尝试解析 provider/code 到可读信息
+                    const smsResponse = d.sms_response ?? null;
+                    const smsInfo = smsResponse
+                      ? resolveSmsResult(
+                          smsResponse.provider || "sms-console",
+                          smsResponse.output ?? smsResponse.body ?? smsResponse,
+                          typeof smsResponse.status === "number"
+                            ? smsResponse.status
+                            : smsResponse.status &&
+                              !Number.isNaN(Number(smsResponse.status))
+                            ? Number(smsResponse.status)
+                            : undefined
+                        )
+                      : null;
+
                     return (
                       <tr
                         key={d.id}
@@ -457,30 +473,24 @@ export default function UnifiedHistoryPage() {
                           style={{
                             padding: 10,
                             color: "#555",
-                            whiteSpace: "pre-wrap",
-                            wordBreak: "break-word",
+                            whiteSpace: "nowrap",
+                            overflow: "hidden",
+                            textOverflow: "ellipsis",
                           }}
                         >
-                          <div>
-                            {d.raw ? JSON.stringify(d.raw).slice(0, 200) : "-"}
-                          </div>
-                          {d.sms_response ? (
-                            <div
-                              style={{
-                                marginTop: 6,
-                                fontSize: 12,
-                                color: "#444",
-                              }}
-                            >
+                          {smsInfo ? (
+                            <div style={{ fontSize: 13, color: "#444" }}>
                               <strong>SMS:</strong>{" "}
-                              {d.sms_sent ? "成功" : "失敗"} -{" "}
-                              {String(
-                                d.sms_response.output ||
-                                  d.sms_response.error ||
-                                  ""
-                              ).slice(0, 200)}
+                              {smsInfo.level === "success"
+                                ? "成功"
+                                : smsInfo.level === "failed"
+                                ? "失敗"
+                                : "エラー"}{" "}
+                              - {smsInfo.message}
                             </div>
-                          ) : null}
+                          ) : (
+                            <div style={{ color: "#999" }}>-</div>
+                          )}
                         </td>
                       </tr>
                     );
