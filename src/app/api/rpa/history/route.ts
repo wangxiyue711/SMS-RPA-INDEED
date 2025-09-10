@@ -87,12 +87,18 @@ export async function POST(req: NextRequest) {
 
     function nameMatchesChecks(name: string, checks: any) {
       if (!name || !checks) return null;
-      const s = String(name || "").trim();
+      // 去掉括号内的振り仮名/読み仮名等（支持全角和半角括号）
+      const sRaw = String(name || "").trim();
+      const s = sRaw.replace(/\（.*?\）|\(.*?\)/g, "").trim();
       if (!s) return null;
       const hasKanji = /[\u4e00-\u9fff]/.test(s);
       const hasKatakana = /[\u30A0-\u30FF]/.test(s);
       const hasHiragana = /[\u3040-\u309F]/.test(s);
-      const hasAlpha = /[A-Za-z]/.test(s);
+      // 对英文字母的判断：如果姓或名任一包含英文字母，则视为 alphabet
+      const parts = s.split(/\s+/).filter(Boolean);
+      const family = parts[0] || "";
+      const given = parts[1] || "";
+      const hasAlpha = /[A-Za-z]/.test(family) || /[A-Za-z]/.test(given);
       // If any check is true, treat as OR: match if any selected type is present. If none selected, return null (no opinion)
       const anySelected = !!(
         checks.kanji ||
@@ -223,9 +229,23 @@ export async function POST(req: NextRequest) {
         }
       }
 
+      // prepare name variants: raw (may include ふりがな in parentheses), clean (parentheses removed), and furigana extracted
+      const rawName = r.name || r["姓名（ふりがな）"] || "";
+      const furiganaMatch = String(rawName).match(
+        /(?:\(|\（)\s*([^\)\）]+?)\s*(?:\)|\）)\s*$/
+      );
+      const furigana = furiganaMatch ? furiganaMatch[1].trim() : null;
+      const cleanName = String(rawName)
+        .replace(/\（.*?\）|\(.*?\)/g, "")
+        .trim();
+
       const payload: any = {
         createdAt: now,
-        name: r.name || r["姓名（ふりがな）"] || "",
+        // `name` keeps the cleaned display name (parentheses removed) for UI display
+        name: cleanName || rawName || "",
+        // preserve originals for audit and optional display
+        name_raw: rawName || "",
+        furigana: furigana,
         phone: phoneRaw,
         gender: r.gender || r["性別"] || "",
         birth: r.birth || r["生年月日"] || "",

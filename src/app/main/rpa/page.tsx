@@ -327,7 +327,9 @@ export default function RpaPage() {
 
       // 如果后端返回非 success，显示明显的提示以便排查（例如 Vercel 返回的 501 guard）
       if (!data || !data.success) {
-        const errMsg = data?.error || (resp && resp.status ? `HTTP ${resp.status}` : "不明なエラー");
+        const errMsg =
+          data?.error ||
+          (resp && resp.status ? `HTTP ${resp.status}` : "不明なエラー");
         setStatusText(`❌ 個人情報取得失敗: ${errMsg}`);
         // 保持提示若干秒后恢复
         setTimeout(() => setStatusText(prevStatus), 6000);

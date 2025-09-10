@@ -454,7 +454,23 @@ export default function UnifiedHistoryPage() {
                         <td style={{ padding: 10, whiteSpace: "nowrap" }}>
                           {fmtJa(ts)}
                         </td>
-                        <td style={{ padding: 10 }}>{d.name || "-"}</td>
+                        <td style={{ padding: 10 }}>
+                          <div style={{ lineHeight: 1.2 }}>{d.name || "-"}</div>
+                          {(d.furigana ||
+                            (d.name_raw && d.name_raw !== d.name)) && (
+                            <div
+                              style={{
+                                fontSize: 12,
+                                color: "#888",
+                                marginTop: 4,
+                              }}
+                            >
+                              {d.furigana
+                                ? `（ふりがな: ${d.furigana}）`
+                                : d.name_raw}
+                            </div>
+                          )}
+                        </td>
                         <td style={{ padding: 10 }}>{d.phone || "-"}</td>
                         <td style={{ padding: 10 }}>{d.gender || "-"}</td>
                         <td style={{ padding: 10 }}>{d.birth || "-"}</td>
