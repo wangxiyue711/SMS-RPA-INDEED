@@ -305,6 +305,7 @@ export default function RpaPage() {
     // set a local running flag so UI can show small helper text and hover is styled
     setPersonalInfoRunning(true);
     try {
+      const prevStatus = statusText;
       const FirebaseAPI = (window as any).FirebaseAPI;
       const cfg = FirebaseAPI?.getUserConfig
         ? await FirebaseAPI.getUserConfig()
@@ -322,6 +323,14 @@ export default function RpaPage() {
         data = await resp.json();
       } catch (e) {
         data = { success: false };
+      }
+
+      // 如果后端返回非 success，显示明显的提示以便排查（例如 Vercel 返回的 501 guard）
+      if (!data || !data.success) {
+        const errMsg = data?.error || (resp && resp.status ? `HTTP ${resp.status}` : "不明なエラー");
+        setStatusText(`❌ 個人情報取得失敗: ${errMsg}`);
+        // 保持提示若干秒后恢复
+        setTimeout(() => setStatusText(prevStatus), 6000);
       }
 
       if (data && data.success) {
