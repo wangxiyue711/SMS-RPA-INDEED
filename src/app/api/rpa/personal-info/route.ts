@@ -43,16 +43,53 @@ export async function POST(req: Request): Promise<Response> {
     const isVercel = Boolean(process.env.VERCEL || process.env.VERCEL_ENV);
     if (isVercel) {
       try {
+        // Try to resolve the actual user_configs document id so worker can read
+        // full user config directly (this avoids mismatches between auth uid and doc id).
+        let resolvedDocId: string | null = null;
+        try {
+          if (userUid) {
+            const byId = await adminDb.collection("user_configs").doc(String(userUid)).get();
+            if (byId.exists) {
+              resolvedDocId = byId.id;
+            } else {
+              const fields = ["authUid", "uid", "email", "userUid"];
+              for (const f of fields) {
+                try {
+                  const q = await adminDb.collection("user_configs").where(f, "==", String(userUid)).limit(1).get();
+                  if (!q.empty) {
+                    resolvedDocId = q.docs[0].id;
+                    // merge server-side cfg if none provided
+                    if (!cfg) cfg = { ...(q.docs[0].data() || {}), ...(cfg || {}) };
+                    break;
+                  }
+                } catch (e) {
+                  // ignore single-field query failures
+                }
+              }
+            }
+          }
+        } catch (e) {
+          // ignore resolution errors; worker will attempt its own resolution
+        }
+
         const job = {
           status: "queued",
           userUid: userUid || null,
+          userDocId: resolvedDocId,
           cfg: cfg || {},
           created_at: new Date().toISOString(),
         };
         const docRef = await adminDb.collection("rpa_jobs").add(job);
-        return NextResponse.json({ success: true, queued: true, jobId: docRef.id });
+        return NextResponse.json({
+          success: true,
+          queued: true,
+          jobId: docRef.id,
+        });
       } catch (e: any) {
-        return NextResponse.json({ success: false, error: String(e) }, { status: 500 });
+        return NextResponse.json(
+          { success: false, error: String(e) },
+          { status: 500 }
+        );
       }
     }
 
@@ -83,7 +120,10 @@ export async function POST(req: Request): Promise<Response> {
         child.unref();
         return NextResponse.json({ success: true, message: "monitor_started" });
       } catch (e: any) {
-        return NextResponse.json({ success: false, error: String(e) }, { status: 500 });
+        return NextResponse.json(
+          { success: false, error: String(e) },
+          { status: 500 }
+        );
       }
     }
 
