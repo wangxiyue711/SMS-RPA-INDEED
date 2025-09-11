@@ -12,23 +12,9 @@ export const dynamic = "force-dynamic";
 // export const maxDuration = 900; // 可选，长任务
 
 export async function POST(req: Request): Promise<Response> {
-  // Early guard: Vercel / other serverless platforms normally do not allow
-  // spawning arbitrary child processes or bundling Python runtimes. If the
-  // app is deployed to Vercel, return a clear JSON error so the frontend
-  // doesn't attempt to parse an HTML error page (which causes the
-  // "Unexpected token" JSON parse error shown on the screenshot).
-  if (process.env.VERCEL || process.env.VERCEL_ENV) {
-    return NextResponse.json(
-      {
-        success: false,
-        error:
-          "This deployment environment (Vercel) does not support running the Python RPA worker. Deploy to a Node server or run the Python worker separately and POST results to the API.",
-      },
-      { status: 501 }
-    );
-  }
   try {
     // 关键：使用 Web 标准 Request，而不是 NextRequest
+    // 先解析 body 并尽量在服务端合并用户配置（便于 enqueue）
     let body: any = {};
     try {
       body = await req.json();
@@ -52,6 +38,24 @@ export async function POST(req: Request): Promise<Response> {
       }
     }
 
+    // If deployed on Vercel, spawn/child_process is not supported. Enqueue a job
+    // document into Firestore so a separate Python worker can pick it up.
+    const isVercel = Boolean(process.env.VERCEL || process.env.VERCEL_ENV);
+    if (isVercel) {
+      try {
+        const job = {
+          status: "queued",
+          userUid: userUid || null,
+          cfg: cfg || {},
+          created_at: new Date().toISOString(),
+        };
+        const docRef = await adminDb.collection("rpa_jobs").add(job);
+        return NextResponse.json({ success: true, queued: true, jobId: docRef.id });
+      } catch (e: any) {
+        return NextResponse.json({ success: false, error: String(e) }, { status: 500 });
+      }
+    }
+
     const scriptPath = path.resolve(process.cwd(), "rpa_gmail_indeed_test.py");
     const pythonCmd = process.env.RPA_PYTHON_CMD || "python";
 
@@ -65,7 +69,7 @@ export async function POST(req: Request): Promise<Response> {
         encoding: "utf8",
       });
     } catch (_) {
-      // ignore
+      // ignore write failures; spawn may still run with passed config
     }
 
     // monitor 模式：后台 detached，立即返回 Response
@@ -79,10 +83,7 @@ export async function POST(req: Request): Promise<Response> {
         child.unref();
         return NextResponse.json({ success: true, message: "monitor_started" });
       } catch (e: any) {
-        return NextResponse.json(
-          { success: false, error: String(e) },
-          { status: 500 }
-        );
+        return NextResponse.json({ success: false, error: String(e) }, { status: 500 });
       }
     }
 
