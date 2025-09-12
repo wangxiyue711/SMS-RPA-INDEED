@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { adminDb } from "../../../../lib/firebaseAdmin";
 export async function GET(req: NextRequest) {
   try {
     const url = new URL(req.url);
