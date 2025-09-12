@@ -133,8 +133,28 @@ export default function TopDashboard() {
                 const k = toISO(new Date(ts));
                 const dp = buckets.get(k);
                 if (!dp) continue;
-                // RPA counts toward executions but not SMS success/failed counts
+                // RPA counts toward executions. If this RPA entry attempted SMS,
+                // include its result in success/failed counts so Top statistics
+                // match the detailed history view.
                 dp.total += 1;
+                try {
+                  const smsResp = r.sms_response || null;
+                  // Prefer explicit sms_response.level if present
+                  if (smsResp && smsResp.level) {
+                    if (smsResp.level === "success") dp.success += 1;
+                    else if (
+                      smsResp.level === "failed" ||
+                      smsResp.level === "error"
+                    )
+                      dp.failed += 1;
+                  } else if (typeof r.sms_sent !== "undefined") {
+                    // Fallback: use sms_sent boolean
+                    if (r.sms_sent) dp.success += 1;
+                    else dp.failed += 1;
+                  }
+                } catch (e) {
+                  // ignore per-entry parse errors
+                }
               }
               serverFound = true;
             }

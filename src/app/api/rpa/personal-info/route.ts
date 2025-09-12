@@ -43,23 +43,63 @@ export async function POST(req: Request): Promise<Response> {
     const isVercel = Boolean(process.env.VERCEL || process.env.VERCEL_ENV);
     if (isVercel) {
       try {
+        // Check if user already has a pending job (queued, running, needs_setup)
+        let existingJob = null;
+        if (userUid) {
+          try {
+            const existingQuery = await adminDb
+              .collection("rpa_jobs")
+              .where("userUid", "==", String(userUid))
+              .where("status", "in", ["queued", "running", "needs_setup"])
+              .limit(1)
+              .get();
+
+            if (!existingQuery.empty) {
+              existingJob = existingQuery.docs[0];
+              // Update the existing job's timestamp to show it's been re-requested
+              await existingJob.ref.update({
+                requested_at: new Date().toISOString(),
+                request_count: (existingJob.data().request_count || 0) + 1,
+              });
+
+              return NextResponse.json({
+                success: true,
+                queued: true,
+                jobId: existingJob.id,
+                reused: true,
+                status: existingJob.data().status,
+              });
+            }
+          } catch (e) {
+            // ignore query errors, proceed to create new job
+          }
+        }
+
         // Try to resolve the actual user_configs document id so worker can read
         // full user config directly (this avoids mismatches between auth uid and doc id).
         let resolvedDocId: string | null = null;
         try {
           if (userUid) {
-            const byId = await adminDb.collection("user_configs").doc(String(userUid)).get();
+            const byId = await adminDb
+              .collection("user_configs")
+              .doc(String(userUid))
+              .get();
             if (byId.exists) {
               resolvedDocId = byId.id;
             } else {
               const fields = ["authUid", "uid", "email", "userUid"];
               for (const f of fields) {
                 try {
-                  const q = await adminDb.collection("user_configs").where(f, "==", String(userUid)).limit(1).get();
+                  const q = await adminDb
+                    .collection("user_configs")
+                    .where(f, "==", String(userUid))
+                    .limit(1)
+                    .get();
                   if (!q.empty) {
                     resolvedDocId = q.docs[0].id;
                     // merge server-side cfg if none provided
-                    if (!cfg) cfg = { ...(q.docs[0].data() || {}), ...(cfg || {}) };
+                    if (!cfg)
+                      cfg = { ...(q.docs[0].data() || {}), ...(cfg || {}) };
                     break;
                   }
                 } catch (e) {
@@ -72,18 +112,31 @@ export async function POST(req: Request): Promise<Response> {
           // ignore resolution errors; worker will attempt its own resolution
         }
 
+        // Force monitor mode for "personal info" action: run continuously.
+        try {
+          if (!cfg || typeof cfg !== 'object') cfg = {};
+          cfg.monitor = true;
+          // poll interval in seconds
+          cfg.poll_interval = 5;
+        } catch (e) {
+          // ignore
+        }
+
         const job = {
           status: "queued",
           userUid: userUid || null,
           userDocId: resolvedDocId,
           cfg: cfg || {},
           created_at: new Date().toISOString(),
+          requested_at: new Date().toISOString(),
+          request_count: 1,
         };
         const docRef = await adminDb.collection("rpa_jobs").add(job);
         return NextResponse.json({
           success: true,
           queued: true,
           jobId: docRef.id,
+          reused: false,
         });
       } catch (e: any) {
         return NextResponse.json(

@@ -1,5 +1,6 @@
 import { NextRequest, NextResponse } from "next/server";
 import { adminDb } from "../../../../lib/firebaseAdmin";
+import { resolveSmsResult } from "../../../../lib/smsCodes";
 import axios from "axios";
 import url from "url";
 
@@ -363,17 +364,47 @@ export async function POST(req: NextRequest) {
             }
 
             // attempt local format
+            // 支持通过 smsConfig.retry_status_codes 或 smsConfig.retry_on_status 配置要重试的状态码（默认 [560]）
+            const retryCodesRaw: any = smsConfig.retry_status_codes ||
+              smsConfig.retry_on_status || [560];
+            let retryCodes: number[] = [];
+            if (Array.isArray(retryCodesRaw)) {
+              retryCodes = retryCodesRaw
+                .map((v: any) => Number(v))
+                .filter((n: number) => !Number.isNaN(n));
+            } else {
+              const n = Number(retryCodesRaw);
+              if (!Number.isNaN(n)) retryCodes = [n];
+            }
+
+            let retryAttempted = false;
             let sendRes = await postOnce(localNum);
-            if (sendRes.resp && sendRes.resp.status === 560) {
+            if (sendRes.resp && retryCodes.includes(sendRes.resp.status)) {
               const alt = to81FromLocal(localNum);
               const retry = await postOnce(alt);
               sendRes = retry;
+              retryAttempted = true;
             }
 
             payload.sms_sent = !!(sendRes.resp && sendRes.resp.ok);
+            // Parse provider/code/level/message using shared codebook and attach
+            const provider = String(smsConfig.provider || "sms-console");
+            const httpStatus =
+              sendRes && sendRes.resp ? Number(sendRes.resp.status) : undefined;
+            const bodyOrText = sendRes
+              ? sendRes.text ?? (sendRes.resp && sendRes.resp.data) ?? sendRes
+              : undefined;
+            const resolved = resolveSmsResult(provider, bodyOrText, httpStatus);
+
             payload.sms_response = {
+              provider,
               status: sendRes.resp.status,
               output: String(sendRes.text).slice(0, 4000),
+              retry_attempted: retryAttempted,
+              // human-friendly interpretation from codebook
+              code: resolved.code ?? null,
+              level: resolved.level,
+              message: resolved.message,
             };
             payload.sms_message = message;
           } else {
