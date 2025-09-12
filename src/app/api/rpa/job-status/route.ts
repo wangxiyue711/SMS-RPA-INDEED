@@ -1,6 +1,4 @@
 import { NextRequest, NextResponse } from "next/server";
-import { adminDb } from "../../../../lib/firebaseAdmin";
-
 export async function GET(req: NextRequest) {
   try {
     const url = new URL(req.url);
@@ -15,7 +13,7 @@ export async function GET(req: NextRequest) {
       return NextResponse.json({ error: "Job not found" }, { status: 404 });
     }
 
-  const data = doc.data();
+    const data = doc.data();
     return NextResponse.json({
       status: data?.status || "unknown",
       needs_setup_reason: data?.needs_setup_reason,

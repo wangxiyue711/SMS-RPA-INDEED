@@ -114,7 +114,7 @@ export async function POST(req: Request): Promise<Response> {
 
         // Force monitor mode for "personal info" action: run continuously.
         try {
-          if (!cfg || typeof cfg !== 'object') cfg = {};
+          if (!cfg || typeof cfg !== "object") cfg = {};
           cfg.monitor = true;
           // poll interval in seconds
           cfg.poll_interval = 5;
