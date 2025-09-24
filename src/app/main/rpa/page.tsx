@@ -330,9 +330,47 @@ export default function RpaPage() {
         const errMsg =
           data?.error ||
           (resp && resp.status ? `HTTP ${resp.status}` : "不明なエラー");
-        setStatusText(`❌ 個人情報取得失敗: ${errMsg}`);
-        // 保持提示若干秒后恢复
-        setTimeout(() => setStatusText(prevStatus), 6000);
+
+        // 特殊处理：如果是入队成功但需要设置
+        if (data?.queued && data?.jobId) {
+          const reusedText = data?.reused ? " (既存タスク再利用)" : "";
+          setStatusText(
+            `✅ タスクをキューに追加しました${reusedText} (ID: ${data.jobId})`
+          );
+
+          // 如果是重用的任务且状态已知，立即显示状态
+          if (data?.reused && data?.status === "needs_setup") {
+            setStatusText(`⚠️ 設定が必要: メール設定を完了してください`);
+            setTimeout(() => setStatusText(prevStatus), 10000);
+            return;
+          }
+
+          // 检查是否需要用户设置
+          setTimeout(async () => {
+            try {
+              const jobResp = await fetch(
+                `/api/rpa/job-status?jobId=${data.jobId}`
+              );
+              const jobData = await jobResp.json();
+              if (jobData?.status === "needs_setup") {
+                setStatusText(`⚠️ 設定が必要: メール設定を完了してください`);
+              } else if (jobData?.status === "done") {
+                setStatusText(`✅ 個人情報取得完了`);
+              } else if (jobData?.status === "failed") {
+                setStatusText(
+                  `❌ 処理失敗: ${jobData?.error || "不明なエラー"}`
+                );
+              }
+            } catch (e) {
+              // ignore check errors
+            }
+          }, 3000);
+          setTimeout(() => setStatusText(prevStatus), 10000);
+        } else {
+          setStatusText(`❌ 個人情報取得失敗: ${errMsg}`);
+          // 保持提示若干秒后恢复
+          setTimeout(() => setStatusText(prevStatus), 6000);
+        }
       }
 
       if (data && data.success) {
@@ -480,25 +518,6 @@ export default function RpaPage() {
         </ul>
 
         <div style={{ display: "flex", gap: 8, marginTop: 8 }}>
-          <button
-            type="button"
-            onClick={handleStart}
-            disabled={!allPass || loading || running || !userUid}
-            style={{
-              padding: "10px 14px",
-              borderRadius: 8,
-              border: "none",
-              fontWeight: 700,
-              cursor:
-                !allPass || loading || running ? "not-allowed" : "pointer",
-              background: "linear-gradient(135deg,#6f8333 0%,#8fa446 100%)",
-              color: "#fff",
-            }}
-            title={!allPass ? "未完了の設定があります" : undefined}
-          >
-            🚀 RPA実行
-          </button>
-
           <button
             type="button"
             onClick={handlePersonalInfo}
