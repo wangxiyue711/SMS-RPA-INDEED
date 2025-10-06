@@ -574,17 +574,10 @@ def process_one_job(db, hostname, rpa_script) -> bool:
     update_payload["expires_at"] = expire_time.isoformat().replace('+00:00', 'Z')
     doc_ref.update(update_payload)
 
-    if user_uid and not monitor_mode:
-        # write history under the resolved user doc id if available, otherwise use original
-        # Skip history write in monitor mode since RPA script writes directly to Firestore
-        history_uid = resolved_user_doc_id or user_uid
-        try:
-            write_history_entry(db, history_uid, result if isinstance(result, dict) else {"raw": result})
-            print(f"[{now_iso()}] Wrote history for user {history_uid}", flush=True)
-        except Exception as e:
-            eprint("Warning: failed to write history:", e)
-    elif user_uid and monitor_mode:
-        print(f"[{now_iso()}] Skipping worker history write in monitor mode (RPA script writes directly)", flush=True)
+    if user_uid:
+        # Always skip worker-side history write: child script performs a single immediate write.
+        # This avoids duplicate records (parent+child) and centralizes normalization/idempotency.
+        print(f"[{now_iso()}] Skipping worker-side history write (child script writes immediately)", flush=True)
 
     return True
 
@@ -660,12 +653,8 @@ def run_once_for_uid(db, hostname, rpa_script, uid: str):
         extra_env['USER_UID'] = uid
         ok, result = run_rpa_script(rpa_script, cfg, log_stdout=True, extra_env=extra_env)
 
-        # write history
-        try:
-            write_history_entry(db, uid, result if isinstance(result, dict) else {"raw": result})
-            print(f"[{now_iso()}] Wrote history for user {uid}", flush=True)
-        except Exception as e:
-            eprint("Warning: failed to write history:", e)
+        # Skip worker-side history write: child script already wrote a single immediate entry
+        print(f"[{now_iso()}] Skipping worker-side history write in run-once (child writes immediately)", flush=True)
 
         return ok
     except Exception as e:
