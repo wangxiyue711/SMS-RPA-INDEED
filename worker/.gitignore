@@ -1,0 +1,5 @@
+# Ignore service account with private key
+service-account.json
+
+n# Chrome user data used by undetected-chromedriver
+chrome_user_data/

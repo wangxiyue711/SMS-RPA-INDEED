@@ -5,6 +5,7 @@ import os, re, imaplib, email, time, datetime, urllib.parse, sys
 import json
 from email.header import decode_header
 from bs4 import BeautifulSoup, Tag
+from typing import Optional
 
 from selenium.webdriver.common.by import By
 from selenium.webdriver.chrome.options import Options
@@ -22,6 +23,41 @@ try:
 except Exception:
     pass
 os.environ.setdefault('PYTHONIOENCODING', 'utf-8')
+
+
+def emit(event_dict: dict, ja: Optional[str] = None, to_stdout: bool = False):
+    """Minimal emit helper for this script: print short Japanese line to stderr for humans,
+    and only print detailed JSON when DEBUG_JSON=1.
+    """
+    try:
+        if ja:
+            try:
+                print(ja, file=sys.stderr)
+            except Exception:
+                pass
+        else:
+            try:
+                lbl = (event_dict or {}).get('evt') or (event_dict or {}).get('event') or '情報'
+                print(str(lbl), file=sys.stderr)
+            except Exception:
+                pass
+
+        debug_json = os.environ.get('DEBUG_JSON')
+        if debug_json and debug_json != '0':
+            try:
+                payload = dict(event_dict or {})
+                if ja:
+                    payload['msg_ja'] = ja
+                payload.setdefault('ts', int(time.time() * 1000))
+                s = json.dumps(payload, ensure_ascii=False)
+                if to_stdout:
+                    print(s, flush=True)
+                else:
+                    print(s, file=sys.stderr, flush=True)
+            except Exception:
+                pass
+    except Exception:
+        pass
 
 # ========= 配置 =========
 IMAP_HOST = "imap.gmail.com"
@@ -97,10 +133,16 @@ def try_fetch_cfg_from_firestore_if_available(user_uid: str):
 # 应用配置到变量
 try:
     if isinstance(cfg, dict):
-        IMAP_USER = cfg.get('email_config', {}).get('address') or cfg.get('IMAP_USER') or IMAP_USER
-        IMAP_PASS = cfg.get('email_config', {}).get('app_password') or cfg.get('IMAP_PASS') or IMAP_PASS
-        SITE_USER = cfg.get('email_config', {}).get('address') or SITE_USER
-        SITE_PASS = cfg.get('email_config', {}).get('site_password') or SITE_PASS
+        email_config = cfg.get('email_config')
+        if isinstance(email_config, dict):
+            IMAP_USER = email_config.get('address') or cfg.get('IMAP_USER') or IMAP_USER
+            IMAP_PASS = email_config.get('app_password') or cfg.get('IMAP_PASS') or IMAP_PASS
+            SITE_USER = email_config.get('address') or SITE_USER
+            SITE_PASS = email_config.get('site_password') or SITE_PASS
+        else:
+            IMAP_USER = cfg.get('IMAP_USER') or IMAP_USER
+            IMAP_PASS = cfg.get('IMAP_PASS') or IMAP_PASS
+            
         SUBJECT_KEYWORD = cfg.get('SUBJECT_KEYWORD') or SUBJECT_KEYWORD
         domains = cfg.get('ALLOWED_DOMAINS')
         if isinstance(domains, (list, tuple)):
@@ -109,14 +151,17 @@ try:
             ALLOWED_DOMAINS = set(x.strip() for x in domains.split(','))
 
     # 当没有从命令行/stdin 获得凭据时，尝试通过环境变量 USER_UID + 服务账号从 Firestore 读取
-    if (not cfg or not isinstance(cfg, dict) or not cfg.get('email_config')) and os.environ.get('USER_UID'):
-        fetched = try_fetch_cfg_from_firestore_if_available(os.environ.get('USER_UID'))
+    user_uid_env = os.environ.get('USER_UID')
+    if (not cfg or not isinstance(cfg, dict) or not cfg.get('email_config')) and user_uid_env:
+        fetched = try_fetch_cfg_from_firestore_if_available(user_uid_env)
         if fetched and isinstance(fetched, dict):
             cfg = {**(fetched or {}), **(cfg or {})}
-            IMAP_USER = cfg.get('email_config', {}).get('address') or IMAP_USER
-            IMAP_PASS = cfg.get('email_config', {}).get('app_password') or IMAP_PASS
-            SITE_USER = cfg.get('email_config', {}).get('address') or SITE_USER
-            SITE_PASS = cfg.get('email_config', {}).get('site_password') or SITE_PASS
+            email_config = cfg.get('email_config')
+            if isinstance(email_config, dict):
+                IMAP_USER = email_config.get('address') or IMAP_USER
+                IMAP_PASS = email_config.get('app_password') or IMAP_PASS
+                SITE_USER = email_config.get('address') or SITE_USER
+                SITE_PASS = email_config.get('site_password') or SITE_PASS
 
     # 安全策略：如果最终没有 IMAP_USER/IMAP_PASS，则停止并返回错误，避免回退到源码中可能的敏感值
     if not IMAP_USER or not IMAP_PASS:
@@ -243,11 +288,13 @@ def extract_target_link_from_email(msg):
     soup = BeautifulSoup(html, "html.parser")
     for a in soup.find_all("a", href=True):
         if "応募内容を確認する" in (a.get_text(strip=True) or ""):
-            cand = peel_indeed_redirect(a["href"])
-            if domain_allowed(cand): return cand
+            href = a.get('href')
+            cand = peel_indeed_redirect(href) if href else None
+            if cand and domain_allowed(cand): return cand
     for a in soup.find_all("a", href=True):
-        cand = peel_indeed_redirect(a["href"])
-        if domain_allowed(cand): return cand
+        href = a.get('href')
+        cand = peel_indeed_redirect(href) if href else None
+        if cand and domain_allowed(cand): return cand
     return None
 
 # ========= 浏览器 =========
@@ -458,51 +505,285 @@ def pretty_print_info(info, source_url=None):
     }
 
 
-def evaluate_sms_target(driver, info):
-    """
-    基于页面 DOM 与已抓取字段决定是否应该发送短信。
-    规则（合理假设）：
-      - 必须有电话号码（数字长度 >=7）
-      - 若能解析年龄且 <18 则不发送
-      - 若页面包含明显的拒否关键词（如 'SMS不可', '連絡不可', '連絡しない'）则不发送
-      - 若页面包含明确同意关键词（如 'SMS可', '連絡可', '同意'）则优先允许
-      - 否则在满足电话和年龄条件下允许发送
-    """
+def send_sms_if_configured(phone, name=""):
+    """发送SMS（如果配置了SMS API）"""
     try:
-        phone = (info.get("__標準_電話番号__") or info.get("phone") or "")
-        pd = re.sub(r"[^0-9]", "", str(phone))
-        if not pd or len(pd) < 7:
+        import requests
+        
+        # 安全地从配置中获取SMS API信息
+        # 优先使用前端的sms_config结构，兼容旧的sms_api结构
+        sms_config = cfg.get("sms_config") if isinstance(cfg, dict) else {}
+        sms_api = cfg.get("sms_api") if isinstance(cfg, dict) else {}
+        
+        # 从sms_config或sms_api中获取配置
+        api_url = ""
+        api_id = ""
+        api_password = ""
+        
+        if isinstance(sms_config, dict) and sms_config.get("api_url"):
+            api_url = sms_config.get("api_url", "")
+            api_id = sms_config.get("api_id", "")
+            api_password = sms_config.get("api_password", "")
+        elif isinstance(sms_api, dict) and sms_api.get("url"):
+            api_url = sms_api.get("url", "")
+            api_id = sms_api.get("id", "")
+            api_password = sms_api.get("password", "")
+        
+        if not all([api_url, api_id, api_password]):
+            return {"success": False, "error": "SMS API not configured"}
+        
+        # 自动转换为日本手机号格式（API要求：仅数字，无+号）
+        phone_for_api = re.sub(r"[^0-9]", "", str(phone))
+
+        def is_valid_jp_phone(num):
+            if not num.isdigit():
+                return False
+            l = len(num)
+            # 11桁: 020X,060X,070X,080X,090X (X=1-9)
+            if l == 11 and re.match(r"^(020[1-9]|060[1-9]|070[1-9]|080[1-9]|090[1-9])", num):
+                return True
+            # 14桁: 0200,0600,0700,0800,0900
+            if l == 14 and re.match(r"^(0200|0600|0700|0800|0900)", num):
+                return True
+            # 8180,8190开头: 12桁以内
+            if re.match(r"^(8180|8190)", num) and l <= 12:
+                return True
+            # 0和81以外开头: 6~20桁
+            if not num.startswith("0") and not num.startswith("81") and 6 <= l <= 20:
+                return True
             return False
 
+        if not is_valid_jp_phone(phone_for_api):
+            return {"success": False, "error": f"手机号格式不符合API要求: {phone_for_api}"}
+
+        # 构建消息内容（尊重用户配置的模板，支持 template1/template2 交替发送）
+        sms_config = cfg.get("sms_config") if isinstance(cfg, dict) else {}
+        sms_api = cfg.get("sms_api") if isinstance(cfg, dict) else {}
+
+        # 选择模板（支持交替）
+        chosen_source = None
+        message = None
+        try:
+            templates_choice = None
+            if os.environ.get("USER_UID"):
+                fetched = try_fetch_cfg_from_firestore_if_available(os.environ["USER_UID"])
+                if fetched and isinstance(fetched, dict):
+                    tr = fetched.get("target_rules") or {}
+                    templates_choice = tr.get("templates") if isinstance(tr, dict) else None
+
+            if templates_choice is None and isinstance(cfg, dict):
+                tr = cfg.get('target_rules') or {}
+                templates_choice = tr.get('templates') if isinstance(tr, dict) else None
+
+            if isinstance(templates_choice, dict):
+                t1 = bool(templates_choice.get("template1"))
+                t2 = bool(templates_choice.get("template2"))
+                if t1 and t2:
+                    # 双模板交替：同 worker 版本的策略
+                    count = None
+                    try:
+                        uid = os.environ.get('USER_UID')
+                        if uid:
+                            try:
+                                import firebase_admin
+                                from firebase_admin import credentials, firestore
+                                if not firebase_admin._apps:
+                                    cred_path = os.environ.get('GOOGLE_APPLICATION_CREDENTIALS')
+                                    if cred_path and os.path.exists(cred_path):
+                                        cred = credentials.Certificate(cred_path)
+                                        firebase_admin.initialize_app(cred)
+                                db = firestore.client()
+                                docs = list(db.collection('rpa_history').document(str(uid)).collection('entries').stream())
+                                count = len(docs)
+                            except Exception:
+                                count = None
+                    except Exception:
+                        count = None
+
+                    if count is not None:
+                        use_t1 = (count % 2 == 0)
+                    else:
+                        global _SMS_ALTERNATE_TOGGLE
+                        try:
+                            _SMS_ALTERNATE_TOGGLE = globals().get('_SMS_ALTERNATE_TOGGLE', False)
+                            use_t1 = not _SMS_ALTERNATE_TOGGLE
+                            globals()['_SMS_ALTERNATE_TOGGLE'] = use_t1
+                        except Exception:
+                            use_t1 = True
+
+                    if use_t1:
+                        if isinstance(sms_config, dict) and sms_config.get("sms_text_a"):
+                            message = str(sms_config.get("sms_text_a"))
+                            chosen_source = "template1:sms_text_a"
+                    else:
+                        if isinstance(sms_config, dict) and sms_config.get("sms_text_b"):
+                            message = str(sms_config.get("sms_text_b"))
+                            chosen_source = "template2:sms_text_b"
+                else:
+                    if t1 and isinstance(sms_config, dict) and sms_config.get("sms_text_a"):
+                        message = str(sms_config.get("sms_text_a"))
+                        chosen_source = "template1:sms_text_a"
+                    elif t2 and isinstance(sms_config, dict) and sms_config.get("sms_text_b"):
+                        message = str(sms_config.get("sms_text_b"))
+                        chosen_source = "template2:sms_text_b"
+        except Exception:
+            message = None
+
+        # fallback: 如果仍没有 message，则使用默认文本
+        if not message:
+            message = f"お疲れ様です。{name}様の応募を確認いたしました。詳細についてご連絡させていただきます。"
+
+        data = {
+            "mobilenumber": phone_for_api,
+            "smstext": message.replace("&", "＆"),
+        }
+        # 构建 Basic Auth header
+        import base64
+        auth_str = f"{api_id}:{api_password}"
+        auth_b64 = base64.b64encode(auth_str.encode("utf-8")).decode("ascii")
+        headers = {
+            "Authorization": f"Basic {auth_b64}",
+            "Content-Type": "application/x-www-form-urlencoded; charset=UTF-8",
+            "User-Agent": "python-fetch/1.0",
+            "Connection": "close",
+        }
+        response = requests.post(api_url, data=data, headers=headers, timeout=30)
+        if response.status_code == 200:
+            return {
+                "success": True,
+                "provider": "sms-api",
+                "status": response.status_code,
+                "output": response.text
+            }
+        else:
+            return {
+                "success": False,
+                "provider": "sms-api",
+                "status": response.status_code,
+                "error": response.text
+            }
+            
+    except Exception as e:
+        return {"success": False, "error": str(e)}
+
+def evaluate_sms_target(driver, info):
+    """
+    基于用户配置的target_rules判断是否应该发送短信。
+    需要姓名、性别、年龄全部条件都符合才返回True。
+    参考 /src/app/api/rpa/personal-info/route.ts 的逻辑
+    """
+    try:
+        # 获取用户的target_rules配置
+        target_rules = cfg.get("target_rules") if isinstance(cfg, dict) else {}
+        if not target_rules:
+            # 如果没有配置规则，使用默认简单规则
+            phone = (info.get("__標準_電話番号__") or 
+                    info.get("電話番号") or 
+                    info.get("phone") or "")
+            pd = re.sub(r"[^0-9]", "", str(phone))
+            if not pd or len(pd) < 7:
+                return False
+            
+            age = None
+            a = (info.get("__標準_年齢__") or 
+                 info.get("age") or 
+                 info.get("年齢"))
+            try:
+                age = int(str(a)) if a else None
+            except Exception:
+                age = None
+            return age is None or age >= 18
+
+        # 1. 检查姓名条件
+        name = info.get("姓名（ふりがな）") or info.get("name") or ""
+        name_checks = target_rules.get("nameChecks", {})
+        name_configured = bool(name_checks.get("kanji") or 
+                              name_checks.get("katakana") or 
+                              name_checks.get("hiragana") or 
+                              name_checks.get("alphabet"))
+        
+        name_pass = True
+        if name_configured:
+            name_pass = False  # 默认不通过，需要满足至少一个条件
+            
+            # 检查漢字
+            if name_checks.get("kanji") and re.search(r'[\u4e00-\u9fff]', name):
+                name_pass = True
+            # 检查カタカナ  
+            if name_checks.get("katakana") and re.search(r'[\u30a0-\u30ff]', name):
+                name_pass = True
+            # 检查ひらがな
+            if name_checks.get("hiragana") and re.search(r'[\u3040-\u309f]', name):
+                name_pass = True
+            # 检查アルファベット - 只要有英文字母就算
+            if name_checks.get("alphabet") and re.search(r'[A-Za-z]', name):
+                name_pass = True
+
+        # 2. 检查性别和年龄条件
+        gender_raw = info.get("性別") or info.get("gender") or ""
+        gender = None
+        if "男" in gender_raw or "male" in gender_raw.lower():
+            gender = "male"
+        elif "女" in gender_raw or "female" in gender_raw.lower():
+            gender = "female"
+
         age = None
-        a = info.get("__標準_年齢__") or info.get("age")
+        a = (info.get("__標準_年齢__") or 
+             info.get("age") or 
+             info.get("年齢"))
         try:
             age = int(str(a)) if a else None
         except Exception:
             age = None
-        if age is not None and age < 18:
+
+        gender_pass = True
+        age_rules = target_rules.get("age", {})
+        if gender and age_rules.get(gender):
+            gender_rule = age_rules[gender]
+            gender_configured = bool(
+                isinstance(gender_rule.get("include"), bool) or
+                isinstance(gender_rule.get("skip"), bool) or
+                gender_rule.get("min") is not None or
+                gender_rule.get("max") is not None
+            )
+            
+            if gender_configured:
+                # 检查include/skip标志
+                include_flag = None
+                if isinstance(gender_rule.get("include"), bool):
+                    include_flag = gender_rule["include"]
+                elif isinstance(gender_rule.get("skip"), bool):
+                    include_flag = not gender_rule["skip"]
+                
+                if include_flag is False:
+                    gender_pass = False
+                
+                # 检查年龄范围
+                min_age = gender_rule.get("min")
+                max_age = gender_rule.get("max")
+                if min_age is not None or max_age is not None:
+                    if age is None:
+                        gender_pass = False
+                    elif min_age is not None and age < min_age:
+                        gender_pass = False
+                    elif max_age is not None and age > max_age:
+                        gender_pass = False
+
+        # 3. 所有配置的条件都必须通过
+        any_rule_configured = name_configured or (gender and age_rules.get(gender))
+        if not any_rule_configured:
+            return None  # 没有配置规则，返回None让后端决定
+        
+        # 需要所有配置的组都通过
+        if not name_pass:
             return False
-
-        # 检查页面文本中的关键词
-        try:
-            text = BeautifulSoup(driver.page_source or "", "html.parser").get_text("\n", strip=True)
-            low = text.lower()
-            # 明确拒否词
-            deny_keywords = ["sms不可", "連絡不可", "連絡しない", "連絡希望しない", "電話不可", "sms拒否", "smsを受け取らない"]
-            for k in deny_keywords:
-                if k in low:
-                    return False
-            # 明确同意词
-            allow_keywords = ["sms可", "連絡可", "同意", "smsを受け取る"]
-            for k in allow_keywords:
-                if k in low:
-                    return True
-        except Exception:
-            pass
-
-        # 默认：满足电话与年龄则发送
+        if not gender_pass:
+            return False
+            
         return True
-    except Exception:
+        
+    except Exception as e:
+        print(f"evaluate_sms_target error: {e}", file=sys.stderr)
         return False
 
 # ========= 主流程 =========
@@ -525,7 +806,13 @@ def main():
     def _handle_sig(signum, frame):
         nonlocal stop_requested
         stop_requested = True
-        print(json.dumps({"event": "shutdown", "timestamp": int(time.time() * 1000)}), file=sys.stderr, flush=True)
+        try:
+            emit({"event": "shutdown"}, ja="シャットダウン要求を受け取りました")
+        except Exception:
+            try:
+                print(json.dumps({"event": "shutdown", "timestamp": int(time.time() * 1000)}), file=sys.stderr, flush=True)
+            except Exception:
+                pass
 
     signal.signal(signal.SIGINT, _handle_sig)
     signal.signal(signal.SIGTERM, _handle_sig)
@@ -537,10 +824,20 @@ def main():
             if not msgs:
                 # 没有新消息：在非监控模式下立即返回；在监控模式下等待并继续
                 if not monitor:
-                    print(json.dumps({"success": True, "results": [], "message": "no_unread"}, ensure_ascii=False), flush=True)
+                    # keep stdout JSON for collectors when not monitoring
+                    try:
+                        print(json.dumps({"success": True, "results": [], "message": "no_unread"}, ensure_ascii=False), flush=True)
+                    except Exception:
+                        pass
                     return
                 else:
-                    print(json.dumps({"event": "idle", "timestamp": int(time.time() * 1000)}), file=sys.stderr, flush=True)
+                    try:
+                        emit({"event": "idle"}, ja="未読メールはありません（アイドル）")
+                    except Exception:
+                        try:
+                            print(json.dumps({"event": "idle", "timestamp": int(time.time() * 1000)}), file=sys.stderr, flush=True)
+                        except Exception:
+                            pass
                     time.sleep(poll_interval)
                     continue
 
@@ -553,12 +850,18 @@ def main():
                 if stop_requested: break
                 target_url = extract_target_link_from_email(msg)
                 if not target_url:
-                    # 标记已读以避免重复尝试
+                    # 没有目标链接：跳过并保持未读，留待人工检查
                     try:
-                        mark_message_seen(mid)
+                        emit({"event": "processing_skip", "reason": "no_target_url_keep_unread", "mid": mid.decode() if isinstance(mid, bytes) else str(mid)}, ja="ターゲットURLが見つかりません。未読のまま保持します")
                     except Exception:
-                        pass
+                        try:
+                            print(json.dumps({"event": "processing_skip", "reason": "no_target_url_keep_unread", "mid": mid.decode() if isinstance(mid, bytes) else str(mid), "timestamp": int(time.time() * 1000)}), file=sys.stderr, flush=True)
+                        except Exception:
+                            pass
                     continue
+
+                processed_ok = False
+                ent = None
                 try:
                     site_login_and_open(driver, target_url, SITE_USER, SITE_PASS)
                     ensure_in_latest_tab(driver)
@@ -569,15 +872,81 @@ def main():
                         ent["should_send_sms"] = evaluate_sms_target(driver, info)
                     except Exception:
                         ent["should_send_sms"] = False
+
+                    # 如果判断应该发送SMS，则实际发送
+                    if ent.get("should_send_sms") and ent.get("phone"):
+                        try:
+                            sms_result = send_sms_if_configured(ent["phone"], ent["name"])
+                            ent["sms_sent"] = sms_result.get("success", False)
+                            ent["sms_response"] = sms_result
+                        except Exception as e:
+                            print(f"SMS发送失败: {e}", file=sys.stderr)
+                            ent["sms_sent"] = False
+                            ent["sms_response"] = {"success": False, "error": str(e)}
+                    else:
+                        ent["sms_sent"] = False
+
                     results_batch.append(ent)
+                    processed_ok = True
                 except Exception as e:
                     print("error processing target:", e, file=sys.stderr)
-                finally:
-                    # 处理完成后标记消息为已读
-                    try:
-                        mark_message_seen(mid)
-                    except Exception:
-                        pass
+
+                # 只有在处理成功时才标记为已读并写历史
+                try:
+                    if processed_ok and ent:
+                        try:
+                            mark_message_seen(mid)
+                        except Exception:
+                            pass
+
+                        try:
+                            uid_env = os.environ.get('USER_UID')
+                            if uid_env:
+                                now_ms = int(time.time() * 1000)
+                                written_iso = datetime.datetime.now(datetime.timezone.utc).isoformat().replace('+00:00', 'Z')
+                                history_entry = {
+                                    "createdAt": now_ms,
+                                    "name": ent.get("name") or ent.get("姓名（ふりがな）") or "",
+                                    "phone": ent.get("phone") or ent.get("電話番号") or "",
+                                    "gender": ent.get("gender") or ent.get("性別") or "",
+                                    "birth": ent.get("birth") or ent.get("生年月日") or "",
+                                    "age": ent.get("age") or ent.get("__標準_年齢__") or "",
+                                    "source_url": ent.get("source_url") or target_url,
+                                    "is_sms_target": bool(ent.get("should_send_sms", False)),
+                                    "sms_sent": ent.get("sms_sent"),
+                                    "sms_response": ent.get("sms_response"),
+                                    "level": "success",
+                                    "_written_at": written_iso,
+                                    "_worker_version": "1.0",
+                                }
+                                try:
+                                    try:
+                                        debug_json = os.environ.get('DEBUG_JSON')
+                                        if debug_json and debug_json != '0':
+                                            try:
+                                                print(json.dumps({"event": "about_to_write_history", "uid": uid_env, "payload": history_entry}, ensure_ascii=False), file=sys.stderr, flush=True)
+                                            except Exception:
+                                                pass
+                                        else:
+                                            try:
+                                                emit({"event": "about_to_write_history", "uid": uid_env, "name": history_entry.get('name')}, ja="履歴を書き込みます")
+                                            except Exception:
+                                                pass
+                                    except Exception:
+                                        pass
+                                    # call write function if available in globals (worker may provide it)
+                                    writer = globals().get('write_history_entry_to_firestore')
+                                    if callable(writer):
+                                        try:
+                                            writer(uid_env, history_entry)
+                                        except Exception:
+                                            pass
+                                except Exception:
+                                    pass
+                        except Exception:
+                            pass
+                except Exception:
+                    pass
 
             # 打印 batch 结果为一行 JSON（可被流式消费）
             try:
