@@ -419,7 +419,8 @@ export default function UnifiedHistoryPage() {
                   <tr style={{ background: "#f6f7f2" }}>
                     {[
                       "時刻",
-                      "姓名（ふりがな）",
+                      "氏名",
+                      "ふりがな",
                       "電話番号",
                       "性別",
                       "生年月日",
@@ -460,6 +461,30 @@ export default function UnifiedHistoryPage() {
                         )
                       : null;
 
+                    // 拆分姓名和ふりがな：优先用字段，其次从括号中提取
+                    const rawName =
+                      d && typeof d.name === "string"
+                        ? d.name
+                        : d?.name
+                        ? String(d.name)
+                        : "";
+                    let nameDisplay = rawName || "";
+                    let furiganaDisplay: string =
+                      (typeof d?.furigana === "string" ? d.furigana : "") || "";
+                    try {
+                      if (!furiganaDisplay && rawName) {
+                        const m = rawName.match(
+                          /(?:\(|（)\s*([^\)）]+?)\s*(?:\)|）)\s*$/
+                        );
+                        if (m) furiganaDisplay = (m[1] || "").trim();
+                      }
+                      if (nameDisplay) {
+                        nameDisplay = nameDisplay
+                          .replace(/（.*?）|\(.*?\)/g, "")
+                          .trim();
+                      }
+                    } catch {}
+
                     // detect summary failure entries from worker (処理に失敗しました)
                     const isSummaryFailure =
                       (d.name &&
@@ -476,22 +501,12 @@ export default function UnifiedHistoryPage() {
                         <td style={{ padding: 10, whiteSpace: "nowrap" }}>
                           {fmtJa(ts)}
                         </td>
+                        <td style={{ padding: 10 }}>{nameDisplay || "-"}</td>
                         <td style={{ padding: 10 }}>
-                          <div style={{ lineHeight: 1.2 }}>{d.name || "-"}</div>
-                          {(d.furigana ||
-                            (d.name_raw && d.name_raw !== d.name)) && (
-                            <div
-                              style={{
-                                fontSize: 12,
-                                color: "#888",
-                                marginTop: 4,
-                              }}
-                            >
-                              {d.furigana
-                                ? `（ふりがな: ${d.furigana}）`
-                                : d.name_raw}
-                            </div>
-                          )}
+                          {furiganaDisplay ||
+                            (d?.name_raw && d.name_raw !== rawName
+                              ? String(d.name_raw)
+                              : "-")}
                         </td>
                         <td style={{ padding: 10 }}>{d.phone || "-"}</td>
                         <td style={{ padding: 10 }}>{d.gender || "-"}</td>

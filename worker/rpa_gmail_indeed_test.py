@@ -234,9 +234,33 @@ def try_fetch_cfg_from_firestore_if_available(user_uid: Optional[str]):
         return None
 
 
+def _normalize_name_and_furigana(raw_name: str):
+    name = raw_name or ""
+    furigana = ""
+    try:
+        m = re.search(r'(?:\(|\（)\s*([^\)\）]+?)\s*(?:\)|\）)\s*$', str(name))
+        if m:
+            furigana = (m.group(1) or "").strip()
+            name = re.sub(r'\（.*?\）|\(.*?\)', '', str(name)).strip()
+    except Exception:
+        pass
+    return name, furigana
+
+def _normalize_phone_for_compare(phone: Optional[str]) -> str:
+    try:
+        if not phone:
+            return ""
+        s = str(phone)
+        # unify: remove non-digits, map +81 leading to 0
+        digits = re.sub(r"[^0-9]", "", s)
+        if digits.startswith("81") and len(digits) >= 10:
+            digits = "0" + digits[2:]
+        return digits
+    except Exception:
+        return str(phone or "")
+
 def write_history_entry_to_firestore(user_uid: str, entry: dict):
-    """If GOOGLE_APPLICATION_CREDENTIALS is available and firebase_admin can be imported,
-    write a single history entry under rpa_history/{user_uid}/entries."""
+    """Single immediate history write with normalization and idempotency guard."""
     try:
         import firebase_admin
         from firebase_admin import credentials, firestore
@@ -253,6 +277,56 @@ def write_history_entry_to_firestore(user_uid: str, entry: dict):
             firebase_admin.initialize_app(cred)
         db = firestore.client()
         coll = db.collection('rpa_history').document(str(user_uid)).collection('entries')
+
+        # Normalize name/furigana and phone for uniform display and duplicate detection
+        try:
+            nm, fu = _normalize_name_and_furigana(entry.get("name") or entry.get("姓名（ふりがな）") or "")
+            if nm:
+                entry["name"] = nm
+            if fu and not entry.get("furigana"):
+                entry["furigana"] = fu
+        except Exception:
+            pass
+        try:
+            if entry.get("phone"):
+                entry["phone"] = _normalize_phone_display(entry.get("phone"))
+        except Exception:
+            pass
+
+        # Idempotency: skip if a very recent entry exists with same normalized name+phone
+        try:
+            norm_name = str(entry.get("name") or "").strip()
+            norm_phone_cmp = _normalize_phone_for_compare(entry.get("phone"))
+            # time window: last 2 minutes (120000 ms)
+            now_ms = int(time.time() * 1000)
+            window_ms = 120000
+            since_ms = now_ms - window_ms
+            # query limited recent entries to reduce cost
+            try:
+                from google.cloud import firestore as _gcf
+                _DESC = _gcf.Query.DESCENDING
+            except Exception:
+                _DESC = "DESCENDING"
+            recent_q = coll.order_by("createdAt", direction=_DESC).limit(50)
+            recent_docs = list(recent_q.stream())
+            for d in recent_docs:
+                try:
+                    data = d.to_dict() or {}
+                    cat = int(data.get("createdAt") or 0)
+                    if cat and cat < since_ms:
+                        # older than window -> stop scanning
+                        break
+                    dn = str(data.get("name") or "").strip()
+                    dp = _normalize_phone_for_compare(data.get("phone"))
+                    if dn == norm_name and dp == norm_phone_cmp:
+                        # duplicate within time window
+                        emit({"event": "history_skip_duplicate", "uid": user_uid, "name": dn}, ja="直近の重複を検出し履歴をスキップしました")
+                        return True
+                except Exception:
+                    continue
+        except Exception:
+            pass
+
         coll.add(entry)
         return True
     except Exception as e:
@@ -733,7 +807,7 @@ def pretty_print_info(info, source_url=None):
     }
 
 
-def _normalize_phone_display(phone: str) -> str:
+def _normalize_phone_display(phone: Optional[str]) -> str:
     """Convert international like +81 90 4490 4649 to domestic 090-4490-4649 for display."""
     if not phone:
         return ""
@@ -792,7 +866,7 @@ def format_candidate_card(result: dict, uid: Optional[str] = None) -> str:
         try:
             parsed = urllib.parse.urlparse(source)
             domain = parsed.hostname or source
-            lines.append(f"ソース：{domain}  （詳細は記録参照）")
+            lines.append(f"ソース：{domain} ")
         except Exception:
             lines.append(f"ソース：{source}")
 
@@ -1529,6 +1603,7 @@ def main():
                             if uid_env:
                                 now_ms = int(time.time() * 1000)
                                 written_iso = datetime.datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
+                                # Build normalized, frontend-friendly entry (single immediate write only)
                                 history_entry = {
                                     "createdAt": now_ms,
                                     "name": ent.get("name") or ent.get("姓名（ふりがな）") or "",
@@ -1544,8 +1619,9 @@ def main():
                                     "_written_at": written_iso,
                                     "_worker_version": "1.0",
                                 }
+                                # Normalize name/furigana and phone before write happens inside writer
                                 try:
-                                    emit({"event": "about_to_write_history", "uid": uid_env}, ja="履歴を保存します...")
+                                    emit({"event": "about_to_write_history", "uid": uid_env, "name": history_entry.get("name")}, ja="履歴を保存します...")
                                     write_history_entry_to_firestore(uid_env, history_entry)
                                 except Exception:
                                     emit({"event": "about_to_write_history_failed", "uid": uid_env}, ja="履歴の保存処理でエラーが発生しました。")
@@ -1579,128 +1655,7 @@ def main():
             except Exception:
                 pass
 
-            # If running as a monitor (USER_UID set and SA available), also write history directly
-            try:
-                uid_env = os.environ.get('USER_UID')
-                if uid_env:
-                    results = out.get('results') if isinstance(out, dict) else None
-                    if results and isinstance(results, list) and len(results) > 0:
-                        # Write one history document per result formatted for the frontend
-                        now_ms = int(time.time() * 1000)
-                        written_iso = datetime.datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
-                        wrote_any = False
-                        for i, res in enumerate(results):
-                            try:
-                                if not isinstance(res, dict):
-                                    continue
-                                history_entry = {
-                                    "createdAt": now_ms + i,
-                                    "name": res.get("name") or res.get("姓名（ふりがな）") or "",
-                                    "phone": res.get("phone") or res.get("電話番号") or "",
-                                    "gender": res.get("gender") or res.get("性別") or "",
-                                    "birth": res.get("birth") or res.get("生年月日") or "",
-                                    "age": res.get("age") or res.get("__標準_年齢__") or "",
-                                    "source_url": res.get("source_url") or "",
-                                    "is_sms_target": bool(res.get("should_send_sms", False)),
-                                    "sms_sent": res.get("sms_sent"),
-                                    "sms_response": res.get("sms_response"),
-                                    "level": "success",
-                                    "_written_at": written_iso,
-                                    "_worker_version": "1.0",
-                                }
-                                # try to extract furigana if present in raw fields
-                                raw_name = res.get("name") or res.get("姓名（ふりがな）") or ""
-                                if raw_name:
-                                    try:
-                                        m = re.search(r'(?:\(|\（)\s*([^\)\）]+?)\s*(?:\)|\）)\s*$', str(raw_name))
-                                        if m:
-                                            history_entry["furigana"] = m.group(1).strip()
-                                            history_entry["name"] = re.sub(r'\（.*?\）|\(.*?\)', '', str(raw_name)).strip()
-                                    except Exception:
-                                        pass
-
-                                # Avoid dumping the full history payload to the console for
-                                # human operators. Only print the full JSON when
-                                # DEBUG_JSON=1 is set for debugging/log-collection.
-                                try:
-                                    debug_json = os.environ.get('DEBUG_JSON')
-                                    if debug_json and debug_json != '0':
-                                        try:
-                                            print(json.dumps({"event": "about_to_write_history", "uid": uid_env, "payload": history_entry}, ensure_ascii=False), file=sys.stderr, flush=True)
-                                        except Exception:
-                                            pass
-                                    else:
-                                        # Short human-friendly line (日本語)
-                                        try:
-                                            emit({"event": "about_to_write_history", "uid": uid_env, "name": history_entry.get('name')}, ja="履歴を書き込みます")
-                                        except Exception:
-                                            pass
-                                except Exception:
-                                    pass
-
-                                try:
-                                    ok = write_history_entry_to_firestore(uid_env, history_entry)
-                                    if ok:
-                                        wrote_any = True
-                                except Exception:
-                                    # continue on write errors for this item
-                                    continue
-                            except Exception:
-                                continue
-
-                        # after attempting all writes, report summary
-                        if wrote_any:
-                            try:
-                                emit({"event": "history_written", "uid": uid_env, "count": len(results)}, ja="履歴を書き込みました")
-                            except Exception:
-                                pass
-                        else:
-                            try:
-                                emit({"event": "history_write_failed", "uid": uid_env}, ja="履歴の書き込みに失敗しました")
-                            except Exception:
-                                pass
-                    elif len(msgs) > 0:
-                        # Had messages but no successful results - write a summary entry
-                        now_ms = int(time.time() * 1000)
-                        written_iso = datetime.datetime.now(timezone.utc).isoformat().replace('+00:00', 'Z')
-                        
-                        summary_entry = {
-                            "createdAt": now_ms,
-                            "name": f"処理に失敗しました（{len(msgs)} 通のメール）",
-                            "phone": "",
-                            "gender": "",
-                            "birth": "",
-                            "age": "",
-                            "source_url": "",
-                            "is_sms_target": False,
-                            "sms_sent": False,
-                            "sms_response": None,
-                            "level": "error",
-                            "_written_at": written_iso,
-                            "_worker_version": "1.0",
-                            "_summary": True,
-                            "_emails_count": len(msgs)
-                        }
-                        
-                        ok = write_history_entry_to_firestore(uid_env, summary_entry)
-                        if ok:
-                            try:
-                                emit({"event": "history_written", "uid": uid_env, "count": 1, "type": "summary"}, ja="履歴（サマリー）を書き込みました")
-                            except Exception:
-                                pass
-                        else:
-                            try:
-                                emit({"event": "history_write_failed", "uid": uid_env, "type": "summary"}, ja="履歴（サマリー）の書き込みに失敗しました")
-                            except Exception:
-                                pass
-                    else:
-                        # No messages in this batch; do not write empty placeholder documents
-                        try:
-                            emit({"event": "history_skipped", "uid": uid_env}, ja="履歴の書き込みはスキップされました（メッセージなし）")
-                        except Exception:
-                            pass
-            except Exception:
-                pass
+            # Note: batch-level history write removed to avoid duplicate entries.
 
             if not monitor:
                 return
