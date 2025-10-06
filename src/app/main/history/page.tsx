@@ -16,6 +16,11 @@ type UnifiedItem = {
   level: "success" | "failed" | "error" | "info";
   title: string; // 列表主文案
   detail?: string; // 次要说明
+  // 新增字段，方便渲染细节列
+  phone?: string;
+  name?: string;
+  messageExcerpt?: string;
+  raw?: any;
 };
 
 type RpaLog = {
@@ -109,6 +114,9 @@ export default function UnifiedHistoryPage() {
               level: r.level || "info",
               title,
               detail: r.detail || (r.code ? `コード ${r.code}` : undefined),
+              phone,
+              messageExcerpt: r.messageExcerpt || "",
+              raw: r,
             });
           }
         }
@@ -138,6 +146,9 @@ export default function UnifiedHistoryPage() {
                 level: d.level || "info",
                 title,
                 detail: `${d.name || ""} ${d.phone || ""}`.trim() || undefined,
+                name: d.name || "",
+                phone: d.phone || "",
+                raw: d,
               });
             }
           } else {
@@ -449,6 +460,14 @@ export default function UnifiedHistoryPage() {
                         )
                       : null;
 
+                    // detect summary failure entries from worker (処理に失敗しました)
+                    const isSummaryFailure =
+                      (d.name &&
+                        d.name.toString().startsWith("処理に失敗しました")) ||
+                      (d._summary === true &&
+                        typeof d.name === "string" &&
+                        d.name.includes("処理に失敗しました"));
+
                     return (
                       <tr
                         key={d.id}
@@ -482,11 +501,21 @@ export default function UnifiedHistoryPage() {
                           {d.is_sms_target ? "Yes" : "No"}
                         </td>
                         <td style={{ padding: 10 }}>
-                          {typeof d.sms_sent !== "undefined"
-                            ? d.sms_sent
-                              ? "送信済"
-                              : "送信失敗"
-                            : "-"}
+                          {d.is_sms_target === false ? (
+                            "対象外"
+                          ) : typeof d.sms_sent !== "undefined" ? (
+                            d.sms_sent ? (
+                              <span
+                                style={{ color: "#388e3c", fontWeight: 700 }}
+                              >
+                                送信済
+                              </span>
+                            ) : (
+                              "送信失敗"
+                            )
+                          ) : (
+                            "-"
+                          )}
                         </td>
                         <td
                           style={{
@@ -497,7 +526,15 @@ export default function UnifiedHistoryPage() {
                             textOverflow: "ellipsis",
                           }}
                         >
-                          {smsInfo ? (
+                          {isSummaryFailure ? (
+                            <div style={{ fontSize: 13, color: "#d32f2f" }}>
+                              個人情報を取得できませんでした
+                            </div>
+                          ) : d.is_sms_target === false ? (
+                            <div style={{ fontSize: 13, color: "#888" }}>
+                              未送信
+                            </div>
+                          ) : smsInfo ? (
                             <div style={{ fontSize: 13, color: "#444" }}>
                               <strong>SMS:</strong>{" "}
                               {smsInfo.level === "success"
@@ -526,7 +563,7 @@ export default function UnifiedHistoryPage() {
               >
                 <thead>
                   <tr style={{ background: "#f6f7f2" }}>
-                    {["時刻", "種類", "状態", "概要", "詳細"].map((h) => (
+                    {["時刻", "種別", "送信結果", "概要", "詳細"].map((h) => (
                       <th
                         key={h}
                         style={{
@@ -543,15 +580,66 @@ export default function UnifiedHistoryPage() {
                 </thead>
                 <tbody>
                   {view.map((x) => {
-                    const color =
-                      x.level === "success"
-                        ? "#388e3c"
-                        : x.level === "failed"
-                        ? "#d32f2f"
-                        : x.level === "error"
-                        ? "#ff9800"
-                        : "#666";
+                    const isExcluded = !!(
+                      x.raw &&
+                      (x.raw.should_send_sms === false ||
+                        x.raw.is_sms_target === false)
+                    );
+                    const color = isExcluded
+                      ? "#888"
+                      : x.level === "success"
+                      ? "#388e3c"
+                      : x.level === "failed"
+                      ? "#d32f2f"
+                      : x.level === "error"
+                      ? "#ff9800"
+                      : "#666";
                     const kindText = x.kind === "sms" ? "個別送信" : "RPA";
+                    // prepare summary and detail rendering per kind
+                    const summary =
+                      x.kind === "sms"
+                        ? x.phone || x.title.replace(/^📱\s*/, "")
+                        : `${x.name || (x.title || "").split("—")[0]} ${
+                            x.phone || ""
+                          }`.trim();
+
+                    const detailContent =
+                      x.kind === "sms"
+                        ? // show message excerpt up to 15 chars, hover shows full
+                          x.messageExcerpt || x.detail || ""
+                        : // RPA: if explicitly non-target, show 未送信; otherwise show gender / birth / age from raw if available
+                        x.raw && x.raw.is_sms_target === false
+                        ? "未送信"
+                        : x.raw && x.raw.gender
+                        ? `${x.raw.gender} / ${x.raw.birth || ""} / ${
+                            x.raw.age || ""
+                          }`
+                        : x.detail || "";
+
+                    const detailDisplay =
+                      x.kind === "sms"
+                        ? (detailContent || "").toString().slice(0, 15)
+                        : detailContent;
+
+                    // prepare a JSX node for detail so we can colorize HTTP 200 / success
+                    let detailNode: React.ReactNode = detailDisplay || "-";
+                    if (x.kind === "sms") {
+                      const rawCode =
+                        x.raw?.sms_response?.code ??
+                        x.raw?.code ??
+                        x.raw?.status;
+                      const isHttp200 =
+                        String(rawCode) === "200" || Number(rawCode) === 200;
+                      const isSuccessLevel = x.level === "success";
+                      if (isHttp200 || isSuccessLevel) {
+                        detailNode = (
+                          <span style={{ color: "#388e3c" }}>
+                            {detailDisplay || "-"}
+                          </span>
+                        );
+                      }
+                    }
+
                     return (
                       <tr
                         key={x.id}
@@ -571,20 +659,32 @@ export default function UnifiedHistoryPage() {
                             fontWeight: 700,
                           }}
                         >
-                          {x.level.toUpperCase()}
+                          {isExcluded ? "対象外" : x.level.toUpperCase()}
                         </td>
                         <td style={{ padding: 10, minWidth: 240 }}>
-                          {x.title}
+                          {summary}
                         </td>
                         <td
                           style={{
                             padding: 10,
                             color: "#555",
-                            whiteSpace: "pre-wrap",
-                            wordBreak: "break-word",
+                            whiteSpace: "nowrap",
+                            overflow: "hidden",
+                            textOverflow: "ellipsis",
                           }}
                         >
-                          {x.detail || "-"}
+                          {detailNode}
+                          {x.kind === "sms" &&
+                          detailContent &&
+                          detailContent.toString().length > 15 ? (
+                            <span
+                              title={detailContent.toString()}
+                              style={{ marginLeft: 6, color: "#888" }}
+                            >
+                              …
+                            </span>
+                          ) : null}
+                          {x.kind === "rpa" && !detailDisplay ? "-" : null}
                         </td>
                       </tr>
                     );

@@ -1,0 +1,8 @@
+google-cloud-firestore
+firebase-admin
+cryptography
+undetected-chromedriver
+selenium
+beautifulsoup4
+lxml
+requests
