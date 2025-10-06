@@ -462,16 +462,26 @@ export default function UnifiedHistoryPage() {
                       : null;
 
                     // 拆分姓名和ふりがな：优先用字段，其次从括号中提取
-                    const rawName = (d && typeof d.name === "string") ? d.name : (d?.name ? String(d.name) : "");
+                    const rawName =
+                      d && typeof d.name === "string"
+                        ? d.name
+                        : d?.name
+                        ? String(d.name)
+                        : "";
                     let nameDisplay = rawName || "";
-                    let furiganaDisplay: string = (typeof d?.furigana === "string" ? d.furigana : "") || "";
+                    let furiganaDisplay: string =
+                      (typeof d?.furigana === "string" ? d.furigana : "") || "";
                     try {
                       if (!furiganaDisplay && rawName) {
-                        const m = rawName.match(/(?:\(|（)\s*([^\)）]+?)\s*(?:\)|）)\s*$/);
+                        const m = rawName.match(
+                          /(?:\(|（)\s*([^\)）]+?)\s*(?:\)|）)\s*$/
+                        );
                         if (m) furiganaDisplay = (m[1] || "").trim();
                       }
                       if (nameDisplay) {
-                        nameDisplay = nameDisplay.replace(/（.*?）|\(.*?\)/g, "").trim();
+                        nameDisplay = nameDisplay
+                          .replace(/（.*?）|\(.*?\)/g, "")
+                          .trim();
                       }
                     } catch {}
 
@@ -493,7 +503,10 @@ export default function UnifiedHistoryPage() {
                         </td>
                         <td style={{ padding: 10 }}>{nameDisplay || "-"}</td>
                         <td style={{ padding: 10 }}>
-                          {furiganaDisplay || (d?.name_raw && d.name_raw !== rawName ? String(d.name_raw) : "-")}
+                          {furiganaDisplay ||
+                            (d?.name_raw && d.name_raw !== rawName
+                              ? String(d.name_raw)
+                              : "-")}
                         </td>
                         <td style={{ padding: 10 }}>{d.phone || "-"}</td>
                         <td style={{ padding: 10 }}>{d.gender || "-"}</td>
